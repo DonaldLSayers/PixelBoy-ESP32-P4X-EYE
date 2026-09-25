@@ -1,0 +1,12 @@
+idf_component_register(SRCS "main.c"
+                            "app.c"
+                            "app_camera.c"
+                            "app_display.c"
+                            "app_input.c"
+                            "app_settings.c"
+                            "app_settings_common.c"
+                            "app_storage.c"
+                            "display_hw_esp.c"
+                            "platform_esp.c"
+                       INCLUDE_DIRS "."
+                       REQUIRES gbcam stb esp_driver_gpio esp_driver_pcnt esp_lcd esp_timer nvs_flash fatfs)

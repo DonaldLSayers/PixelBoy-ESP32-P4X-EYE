@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.5"
+  # Official ESP32-P4-EYE board support (display, camera, SD card).
+  # The "_noglib" variant would avoid LVGL, but 2.0.1/2.0.2 fail to compile
+  # (they reference lv_indev_t). LVGL is compiled in but never started.
+  espressif/esp32_p4_eye: "^2.0.2"
