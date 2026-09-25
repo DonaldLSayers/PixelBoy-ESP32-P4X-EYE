@@ -251,7 +251,12 @@ def main():
 
     def on_mouse(event, x, y, flags, _):
         if event == cv2.EVENT_MOUSEWHEEL:
-            pending_rot[0] += 1 if cv2.getMouseWheelDelta(flags) > 0 else -1
+            # flags' high 16 bits hold the signed wheel delta; cv2.getMouseWheelDelta()
+            # is missing from some OpenCV python builds (e.g. 5.0.0), so decode it directly.
+            delta = (flags >> 16) & 0xFFFF
+            if delta >= 0x8000:
+                delta -= 0x10000
+            pending_rot[0] += 1 if delta > 0 else -1
         elif event == cv2.EVENT_LBUTTONDOWN:
             hit = dev.hit(x, y)
             if hit == PHYS_TOGGLE:
