@@ -34,16 +34,15 @@ typedef enum {
 #define DC_METHOD_DEFAULT DC_METHOD_SIERRA_LITE   /* dithercam.py DEFAULT_DITHER_METHOD */
 #define DC_AMOUNT_DEFAULT 0.5f                    /* dithercam.py DEFAULT_DITHER_AMOUNT */
 
-/* Output sizes: PIXEL CAM's own RESOLUTIONS list (pixelboy/dithercam.py), so a
- * photo taken here matches one taken on the Android/Pi app at the same
- * setting, plus one extra (128x64, a 2:1 crop at the same width as the
- * 128x96 default). Sizes that are an integer fraction of the 240x240 LCD are
- * shown pixel-perfect, upscaled with sharp square pixels; the rest don't fit
- * the screen and are shown as a smaller same-aspect-ratio "representation"
- * instead (see display_begin_camera) - the photo itself is still captured
- * and saved at the full requested resolution either way. */
+/* Output sizes: not PIXEL CAM's own RESOLUTIONS list - chosen instead so
+ * every preset scales onto the 240x240 LCD by a clean integer factor (1x or
+ * 2x) with no crop and no fractional resample, in 4:3 (120x90, 240x180),
+ * 2:1 (120x60, 240x120), 3:2/"4x6 print" (240x160 at 1x only), and 1:1
+ * (120x120 at 2x, 240x240 at 1x) - the preview is always pixel-identical to
+ * the saved photo, just some presets show it bigger. Ordered by ascending
+ * pixel count. */
 #define DC_SIZE_COUNT 7
-#define DC_SIZE_DEFAULT 3      /* 128x96, PIXEL CAM's own DEFAULT_RESOLUTION_INDEX */
+#define DC_SIZE_DEFAULT 1      /* 120x90 */
 #define DC_MAX_W 1280          /* largest of dc_sizes[]/normal_sizes[] - see normal_sizes' comment */
 #define DC_MAX_H 720
 void dc_size(int index, int *w, int *h);

@@ -18,7 +18,7 @@ $fw = "$root\firmware\main"
     -I "$PSScriptRoot\include" -I $fw -I "$root\components\gbcam\include" -I "$root\components\stb\include" `
     -shared `
     "$PSScriptRoot\sim.c" `
-    "$fw\app.c" "$fw\app_display.c" "$fw\app_storage.c" "$fw\app_settings_common.c" `
+    "$fw\app.c" "$fw\app_display.c" "$fw\app_frames.c" "$fw\app_frames_sd.c" "$fw\app_storage.c" "$fw\app_settings_common.c" `
     "$root\components\gbcam\src\gbcam.c" "$root\components\gbcam\src\gbcam_dither.c" "$root\components\gbcam\src\gbcam_palette.c" "$root\components\gbcam\src\gbcam_pixelcam.c" "$root\components\gbcam\src\dithercam.c" `
     -o "$PSScriptRoot\gbcam_sim.new.dll"
 if ($LASTEXITCODE -ne 0) { throw 'simulator build failed' }

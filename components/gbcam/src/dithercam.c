@@ -9,15 +9,14 @@
 #include "dithercam.h"
 #include "palettes_data.h"
 
-/* pixelboy/dithercam.py's RESOLUTIONS (the first four 4:3, plus its 256x128
- * 2:1 widescreen extra), plus one more of our own: 128x64, a 2:1 crop at the
- * same width as the 128x96 default. Ordered by ascending pixel count, so
- * cycling the menu row is a steady small -> large sweep instead of jumping
- * around (the old order had 128x64 and 256x128 out of sequence). Indices
- * moved: keep DC_SIZE_DEFAULT in dithercam.h in sync with wherever 128x96
- * lands here. */
+/* Not pixelboy/dithercam.py's own RESOLUTIONS list - see the DC_SIZE_COUNT
+ * comment in dithercam.h for why these are picked to always scale onto the
+ * screen by a clean 1x/2x factor instead. Ordered by ascending pixel count,
+ * so cycling the menu row is a steady small -> large sweep. Indices moved:
+ * keep DC_SIZE_DEFAULT in dithercam.h in sync with wherever 120x90 lands
+ * here. */
 static const uint16_t dc_sizes[DC_SIZE_COUNT][2] = {
-    {32, 24}, {64, 48}, {128, 64}, {128, 96}, {256, 128}, {256, 192}, {320, 240},
+    {120, 60}, {120, 90}, {120, 120}, {240, 120}, {240, 160}, {240, 180}, {240, 240},
 };
 
 /* Normal Cam's "digicam" presets - see the NORMAL_SIZE_COUNT comment in

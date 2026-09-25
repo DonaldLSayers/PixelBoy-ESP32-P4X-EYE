@@ -1,5 +1,7 @@
 #include "app_settings.h"
+#include "app_frames_sd.h"
 #include "dithercam.h"
+#include "frames.h"
 
 void settings_defaults(app_settings_t *s)
 {
@@ -16,6 +18,7 @@ void settings_defaults(app_settings_t *s)
     s->dc_amount = DC_AMOUNT_DEFAULT;
     s->vf_scale = 0;
     s->normal_size = NORMAL_SIZE_DEFAULT;
+    s->frame = 0;
 }
 
 bool settings_valid(const app_settings_t *s)
@@ -25,5 +28,6 @@ bool settings_valid(const app_settings_t *s)
            s->style < GBCAM_STYLE_COUNT && s->denoise <= 3 && s->cam_mode < CAM_MODE_COUNT &&
            s->dc_palette < DC_PALETTE_COUNT && s->dc_method < DC_METHOD_COUNT &&
            s->dc_size < DC_SIZE_COUNT && s->dc_amount >= 0.0f && s->dc_amount <= 1.0f &&
-           s->vf_scale <= 1 && s->normal_size < NORMAL_SIZE_COUNT;
+           s->vf_scale <= 1 && s->normal_size < NORMAL_SIZE_COUNT &&
+           s->frame <= FRAME_COUNT + MAX_SD_FRAMES;
 }

@@ -6,6 +6,7 @@
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+#include "app_frames.h"
 #include "app_storage.h"
 #include "platform.h"
 
@@ -20,6 +21,7 @@ typedef struct {
 } photo_t;
 
 static bool s_ready;
+static char s_root[224];  /* SD card mount root, e.g. "/sdcard" */
 static char s_dir[256];   /* <mount root>/GBCAM */
 static photo_t *s_photos; /* sorted ascending by number (one shared sequence) */
 static int s_count;
@@ -72,13 +74,12 @@ esp_err_t storage_init(void)
     s_photos = calloc(MAX_PHOTOS, sizeof(photo_t));
     if (!s_photos) return ESP_ERR_NO_MEM;
 
-    char root[224];
-    esp_err_t err = plat_storage_mount(root, sizeof root);
+    esp_err_t err = plat_storage_mount(s_root, sizeof s_root);
     if (err != ESP_OK) {
         PLOGW(TAG, "no SD card (%s)", esp_err_to_name(err));
         return err;
     }
-    snprintf(s_dir, sizeof s_dir, "%s/GBCAM", root);
+    snprintf(s_dir, sizeof s_dir, "%s/GBCAM", s_root);
     plat_mkdir(s_dir);
     scan();
     s_ready = true;
@@ -87,6 +88,10 @@ esp_err_t storage_init(void)
 }
 
 bool storage_ready(void) { return s_ready; }
+/* SD card mount root (e.g. "/sdcard"), or "" if there's no card - for other
+ * SD-backed features (frames_sd_init()'s /frames folder) that need it but
+ * shouldn't mount the card a second time. */
+const char *storage_root(void) { return s_ready ? s_root : ""; }
 int storage_count(void) { return s_count; }
 int storage_number_at(int pos) { return (pos >= 0 && pos < s_count) ? s_photos[pos].number : -1; }
 bool storage_is_dc_at(int pos) { return (pos >= 0 && pos < s_count) && s_photos[pos].is_dc; }
@@ -97,13 +102,14 @@ static int next_number(void)
     return s_next_number;
 }
 
-int storage_save(const uint8_t *shades, gbcam_palette_t palette)
+int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame)
 {
     int number = next_number();
     if (number < 0) return -1;
     char path[300];
 
-    /* Palette-free tiles for the gallery (and future .sav export). */
+    /* Palette-free tiles for the gallery (and future .sav export) - always
+     * just the plain photo, regardless of frame (see app_storage.h). */
     static uint8_t tiles[GBCAM_TILES_SIZE];
     gbcam_shades_to_tiles(shades, tiles);
     path_for(path, sizeof path, "GB", number, "BIN");
@@ -119,15 +125,27 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette)
         return -1;
     }
 
-    /* Upscaled PNG in the current palette. */
-    const int w = GBCAM_W * PNG_SCALE, h = GBCAM_H * PNG_SCALE;
-    uint8_t *rgb = malloc((size_t)w * h * 3);
+    /* Upscaled PNG in the current palette, framed if requested. */
+    int w, h;
+    uint8_t *rgb;
+    if (frame >= 0) {
+        const frame_meta_t *fm = frames_get(frame);
+        frame_size(fm, PNG_SCALE, &w, &h);
+        rgb = malloc((size_t)w * h * 3);
+        if (rgb) frame_compose_rgb(fm, shades, palette, PNG_SCALE, rgb);
+    } else {
+        w = GBCAM_W * PNG_SCALE;
+        h = GBCAM_H * PNG_SCALE;
+        rgb = malloc((size_t)w * h * 3);
+        if (rgb) {
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const uint8_t *c = gbcam_palette_rgb(palette, shades[(y / PNG_SCALE) * GBCAM_W + x / PNG_SCALE]);
+                    memcpy(rgb + ((size_t)y * w + x) * 3, c, 3);
+                }
+        }
+    }
     if (rgb) {
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++) {
-                const uint8_t *c = gbcam_palette_rgb(palette, shades[(y / PNG_SCALE) * GBCAM_W + x / PNG_SCALE]);
-                memcpy(rgb + ((size_t)y * w + x) * 3, c, 3);
-            }
         path_for(path, sizeof path, "GB", number, "PNG");
         if (!stbi_write_png(path, w, h, 3, rgb, w * 3))
             PLOGW(TAG, "PNG write failed: %s", path);

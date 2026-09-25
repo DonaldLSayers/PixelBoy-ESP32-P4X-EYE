@@ -26,6 +26,7 @@ typedef struct {
     float dc_amount;
     uint8_t vf_scale;    /* GB Camera viewfinder: 0 = 2x cropped (224x224, default), 1 = 1:1 (128x112) */
     uint8_t normal_size; /* Normal Cam resolution, see normal_size() in dithercam.h */
+    uint8_t frame;       /* GB Camera border: 0 = none, 1..FRAME_COUNT = frame_id_t + 1, see frames.h */
 } app_settings_t;
 
 /* Shared by the board and simulator back ends (app_settings_common.c). */

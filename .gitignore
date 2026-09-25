@@ -24,3 +24,12 @@ tools/**/*.new.pdb
 PIXEL CAM/
 **/__pycache__/
 WIN_20260924_13_49_34_Pro.jpg
+
+# Frame art extracted from the original cartridge ROM (framegroup_*.json,
+# frames_int_jp.json and similar exports) is copyrighted Nintendo/Game Freak -
+# never committed, only imported locally into assets/frames/*.png via
+# tools/import_gb_frames.py. Its own PNG output isn't auto-ignored (you may
+# have redrawn/replaced pieces of it as your own art) - review before
+# committing anything under assets/frames/ that came from one of these.
+assets/frames/framegroup_*.json
+assets/frames/frames_*.json
