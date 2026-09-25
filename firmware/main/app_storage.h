@@ -20,6 +20,7 @@
 
 esp_err_t storage_init(void);
 bool storage_ready(void);
+const char *storage_root(void);
 
 /* Number of photos, and the photo number / kind at a gallery position
  * (0 = oldest). */
@@ -27,8 +28,11 @@ int storage_count(void);
 int storage_number_at(int pos);
 bool storage_is_dc_at(int pos);
 
-/* Save the shades; returns the new photo number, or -1 on error. */
-int storage_save(const uint8_t *shades, gbcam_palette_t palette);
+/* Save the shades; returns the new photo number, or -1 on error. frame is
+ * -1 for no border, or a frame_id_t (see frames.h) to bake one into the
+ * saved .PNG (frame_compose_rgb(), scaled to PNG_SCALE) - the .BIN tiles the
+ * gallery reads back are always just the plain 128x112 photo, unframed. */
+int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame);
 
 esp_err_t storage_load(int number, uint8_t *shades);
 

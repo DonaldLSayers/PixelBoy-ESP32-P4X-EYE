@@ -5,8 +5,8 @@
  * Boots straight into a viewfinder with three camera modes (Bottom button cycles):
  *   GB CAMERA    the Game Boy Camera look (PIXEL CAM / HARDWARE style), with
  *                on-screen brightness/contrast bars like the real camera
- *   DITHER CAM   PIXEL CAM's Dither Cam: arbitrary palette + dither pattern
- *   NORMAL CAM   plain colour preview, with brightness/contrast
+ *   PIXELBOY     PIXEL CAM's Dither Cam: arbitrary palette + dither pattern
+ *   DIGICAM      plain colour preview, with brightness/contrast
  *
  * Controls:
  *   Encoder press    take a photo (shutter)

@@ -5,6 +5,7 @@
 
 #include "esp_err.h"
 #include "gbcam.h"
+#include "icons.h"
 
 /* 240x240 LCD. The 128x112 image is shown at 2x (256x224) with 8 px cropped
  * from each side so it fills 240x224, leaving an 8 px bar above and below. */
@@ -32,11 +33,17 @@ void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette);
  *
  * adjust: which of GB's three quick-adjust targets the encoder currently
  * moves - 0 brightness, 1 contrast, 2 palette. Lights the matching bar
- * (neither, for palette) and sets the bottom-left corner letter (B/C/P). */
+ * (neither, for palette) and sets the bottom-left corner letter (B/C/P).
+ *
+ * framed_rgb888: NULL for the plain shades-only draw above; otherwise an
+ * already-composed frame_compose_rgb() canvas (see app_frames.h) to show
+ * instead, centred the same way - only valid alongside native1x (a frame
+ * only ever shows at 1:1, see FRAME_PREVIEW_MS in app.c). */
 void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
                               int brightness, int brightness_max,
                               int contrast, int contrast_max, int adjust,
-                              bool native1x);
+                              bool native1x,
+                              const uint8_t *framed_rgb888, int framed_w, int framed_h);
 
 /* Start a new frame filled with one colour (RGB888). */
 void display_begin_blank(uint8_t r, uint8_t g, uint8_t b);
@@ -48,20 +55,30 @@ int display_text_width(const char *s, int scale);
 /* Filled rectangle (RGB888). */
 void display_rect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
 
-/* Dither Cam / Normal Cam preview: an already-quantized/sampled w x h RGB888
- * image (see dithercam.h's DC_SIZE_COUNT presets). Either way it's a crop to
- * a clean integer scale (up if it's smaller than the 240x240 screen, down if
- * bigger), never a fractional resample - alias-free regardless of dither
- * method, since there's no shifting phase between the sampling grid and a
- * periodic pattern to beat against (see display_begin_camera's comment).
- * Letterboxed in black on whichever axis has room left over. No bars; use
- * display_osd() for feedback on changes. */
-void display_begin_camera(const uint8_t *rgb888, int w, int h);
+/* A 16x16 icon (see icons.h / icons_data.h, generated from assets/icons
+ * by tools/gen_icons.py), alpha-blitted (no blending - opaque or nothing,
+ * see gen_icons.py) at x,y. */
+void display_icon(int x, int y, icon_id_t id);
 
-/* Menu box over the image: a title and up to 6 rows of "label   value",
- * the selected row drawn inverted. value may be NULL for action rows. */
+/* Dither Cam / Normal Cam preview: an already-quantized/sampled w x h RGB888
+ * image (see dithercam.h's DC_SIZE_COUNT presets). With fill=false it's a
+ * crop to a clean integer scale (up if it's smaller than the 240x240 screen,
+ * down if bigger), never a fractional resample - alias-free regardless of
+ * dither method, since there's no shifting phase between the sampling grid
+ * and a periodic pattern to beat against (see display_begin_camera's
+ * comment). Letterboxed in black on whichever axis has room left over.
+ * With fill=true (Normal Cam's live preview - not pixel art, so there's no
+ * aliasing risk to avoid) it instead area-averages the full frame, aspect
+ * preserved, up to whichever of DISP_W/DISP_H it hits first - the same
+ * letterboxing as fill=false, just a fractional fit instead of an integer
+ * one. No bars; use display_osd() for feedback on changes. */
+void display_begin_camera(const uint8_t *rgb888, int w, int h, bool fill);
+
+/* Menu box over the image: a title and up to 6 rows of "icon  label   value",
+ * the selected row drawn inverted. values may be NULL, or an individual
+ * value NULL, for action rows (e.g. GALLERY, EXIT). */
 void display_menu(const char *title, const char *const *labels, const char *const *values,
-                  int count, int selected);
+                  const icon_id_t *icons, int count, int selected);
 
 /* On-screen message box centred on the image, up to two lines. */
 void display_osd(const char *line1, const char *line2);

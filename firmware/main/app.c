@@ -4,8 +4,8 @@
  * Boots straight into a viewfinder with three camera modes (Bottom button cycles):
  *   GB CAMERA    the Game Boy Camera look (PIXEL CAM / HARDWARE style), with
  *                on-screen brightness/contrast bars like the real camera
- *   DITHER CAM   PIXEL CAM's Dither Cam: arbitrary palette + dither pattern
- *   NORMAL CAM   plain colour preview, with brightness/contrast
+ *   PIXELBOY     PIXEL CAM's Dither Cam: arbitrary palette + dither pattern
+ *   DIGICAM      plain colour preview, with brightness/contrast
  *
  * Controls:
  *   Encoder press    take a photo (shutter)
@@ -30,6 +30,8 @@
 #include "app.h"
 #include "app_camera.h"
 #include "app_display.h"
+#include "app_frames.h"
+#include "app_frames_sd.h"
 #include "app_input.h"
 #include "app_settings.h"
 #include "app_storage.h"
@@ -41,6 +43,7 @@ static const char *TAG = "gbcam";
 #define OSD_BRIEF_MS 700
 #define FREEZE_MS 600
 #define DELETE_CONFIRM_MS 3000
+#define FRAME_PREVIEW_MS 2000
 
 typedef enum { SCREEN_VIEWFINDER, SCREEN_MENU, SCREEN_GALLERY } screen_t;
 typedef enum { ADJUST_0, ADJUST_1, ADJUST_2, ADJUST_3 } adjust_t;
@@ -66,6 +69,8 @@ static int s_dc_w, s_dc_h;
 static uint8_t s_still[GBCAM_PIXELS];              /* frozen GB photo / gallery photo */
 static uint8_t *s_still_rgb;                       /* frozen Dither/Normal Cam photo, DC_MAX_W*DC_MAX_H*3 */
 static int64_t s_freeze_until_us;
+static int64_t s_frame_preview_until_us;            /* see ROW_FRAME in activate_menu_row() */
+static uint8_t s_frame_rgb[160 * 224 * 3];           /* GB Camera framed viewfinder/export canvas, worst case (Wild) */
 static int s_gallery_pos;
 static bool s_gallery_dirty;
 static int64_t s_delete_armed_until_us;
@@ -73,7 +78,8 @@ static int64_t s_delete_armed_until_us;
 /* ------------------------------------------------------------------- menu */
 
 typedef enum {
-    ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_DC_PALETTE, ROW_DC_METHOD, ROW_DC_SIZE, ROW_DC_AMOUNT,
+    ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_FRAME, ROW_DC_PALETTE, ROW_DC_METHOD, ROW_DC_SIZE,
+    ROW_DC_AMOUNT,
     ROW_NORMAL_SIZE,
     ROW_DENOISE, ROW_GALLERY, ROW_EXIT
 } menu_row_t;
@@ -148,7 +154,8 @@ static void take_photo(void)
     int n;
     if (s_set.cam_mode == CAM_MODE_GB) {
         memcpy(s_still, s_cam->shades, GBCAM_PIXELS);
-        n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette) : -1;
+        int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
+        n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame) : -1;
     } else {
         memcpy(s_still_rgb, s_dc_rgb, (size_t)s_dc_w * s_dc_h * 3);
         bool jpeg = s_set.cam_mode == CAM_MODE_NORMAL;
@@ -194,9 +201,14 @@ static void leave_gallery(void)
 
 /* --------------------------------------------------------------------- menu */
 
-static void truncate8(char *out, const char *in)
+/* Menu row values (a longer frame/palette/pack name in particular) can run
+ * past what's legible at the menu's fixed scale=1 font - truncate to what
+ * the values[] buffer actually holds (see draw_menu()) rather than the
+ * tighter 8 chars this used to use, so a name gets to use the row's real
+ * width instead of being cut short of it. */
+static void truncate_value(char *out, const char *in)
 {
-    snprintf(out, 9, "%s", in);
+    snprintf(out, 12, "%s", in);
 }
 
 static void build_menu(void)
@@ -207,6 +219,7 @@ static void build_menu(void)
         s_menu_rows[s_menu_count++] = ROW_DITHER;
         s_menu_rows[s_menu_count++] = ROW_STYLE;
         s_menu_rows[s_menu_count++] = ROW_VF_SCALE;
+        s_menu_rows[s_menu_count++] = ROW_FRAME;
     } else if (s_set.cam_mode == CAM_MODE_DITHER) {
         s_menu_rows[s_menu_count++] = ROW_DC_PALETTE;
         s_menu_rows[s_menu_count++] = ROW_DC_METHOD;
@@ -235,38 +248,51 @@ static void draw_menu(void)
 
     char labels[8][12], values[8][12];
     const char *label_ptrs[8], *value_ptrs[8];
+    icon_id_t icons[8];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
         case ROW_PALETTE:
             snprintf(labels[i], sizeof labels[i], "PALETTE");
-            truncate8(values[i], gbcam_palette_name((gbcam_palette_t)s_set.palette));
+            truncate_value(values[i], gbcam_palette_name((gbcam_palette_t)s_set.palette));
             val = values[i];
+            icons[i] = ICON_PALETTE;
             break;
         case ROW_DITHER:
             snprintf(labels[i], sizeof labels[i], "DITHER");
-            truncate8(values[i], gbcam_dither_name((gbcam_dither_t)s_set.dither));
+            truncate_value(values[i], gbcam_dither_name((gbcam_dither_t)s_set.dither));
             val = values[i];
+            icons[i] = ICON_DITHER;
             break;
         case ROW_STYLE:
             snprintf(labels[i], sizeof labels[i], "STYLE");
-            truncate8(values[i], s_set.style == GBCAM_STYLE_PIXELCAM ? "PIXEL" : "HW");
+            truncate_value(values[i], s_set.style == GBCAM_STYLE_PIXELCAM ? "PIXEL" : "HW");
             val = values[i];
+            icons[i] = ICON_STYLE;
             break;
         case ROW_VF_SCALE:
             snprintf(labels[i], sizeof labels[i], "SCALE");
             snprintf(values[i], sizeof values[i], "%s", s_set.vf_scale ? "1:1" : "2X CROP");
             val = values[i];
+            icons[i] = ICON_SCALE;
+            break;
+        case ROW_FRAME:
+            snprintf(labels[i], sizeof labels[i], "FRAME");
+            truncate_value(values[i], s_set.frame == 0 ? "NONE" : frames_get_name(s_set.frame - 1));
+            val = values[i];
+            icons[i] = ICON_FRAME;
             break;
         case ROW_DC_PALETTE:
             snprintf(labels[i], sizeof labels[i], "PALETTE");
-            truncate8(values[i], dc_palette_name(s_set.dc_palette));
+            truncate_value(values[i], dc_palette_name(s_set.dc_palette));
             val = values[i];
+            icons[i] = ICON_PALETTE;
             break;
         case ROW_DC_METHOD:
             snprintf(labels[i], sizeof labels[i], "METHOD");
-            truncate8(values[i], dc_method_name((dc_method_t)s_set.dc_method));
+            truncate_value(values[i], dc_method_name((dc_method_t)s_set.dc_method));
             val = values[i];
+            icons[i] = ICON_METHOD;
             break;
         case ROW_DC_SIZE: {
             int w, h;
@@ -274,38 +300,44 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "SIZE");
             snprintf(values[i], sizeof values[i], "%dX%d", w, h);
             val = values[i];
+            icons[i] = ICON_SIZE;
             break;
         }
         case ROW_DC_AMOUNT: {
             int idx = (int)(s_set.dc_amount * 4.0f + 0.5f);
             snprintf(labels[i], sizeof labels[i], "AMOUNT");
             val = dc_amount_labels[idx > 4 ? 4 : idx];
+            icons[i] = ICON_AMOUNT;
             break;
         }
         case ROW_NORMAL_SIZE:
             snprintf(labels[i], sizeof labels[i], "SIZE");
-            truncate8(values[i], normal_size_name(s_set.normal_size));
+            truncate_value(values[i], normal_size_name(s_set.normal_size));
             val = values[i];
+            icons[i] = ICON_SIZE;
             break;
         case ROW_DENOISE:
             snprintf(labels[i], sizeof labels[i], "DENOISE");
             snprintf(values[i], sizeof values[i], "%d", s_set.denoise);
             val = values[i];
+            icons[i] = ICON_DENOISE;
             break;
         case ROW_GALLERY:
             snprintf(labels[i], sizeof labels[i], "GALLERY");
+            icons[i] = ICON_GALLERY;
             break;
         case ROW_EXIT:
             snprintf(labels[i], sizeof labels[i], "EXIT");
+            icons[i] = ICON_EXIT;
             break;
         }
         label_ptrs[i] = labels[i];
         value_ptrs[i] = val;
     }
     const char *title = s_set.cam_mode == CAM_MODE_GB     ? "GB CAMERA"
-                       : s_set.cam_mode == CAM_MODE_DITHER ? "DITHER CAM"
-                                                            : "NORMAL CAM";
-    display_menu(title, label_ptrs, value_ptrs, s_menu_count, s_menu_sel);
+                       : s_set.cam_mode == CAM_MODE_DITHER ? "PIXELBOY"
+                                                            : "DIGICAM";
+    display_menu(title, label_ptrs, value_ptrs, icons, s_menu_count, s_menu_sel);
 }
 
 static void activate_menu_row(void)
@@ -326,6 +358,11 @@ static void activate_menu_row(void)
     case ROW_VF_SCALE:
         s_set.vf_scale = (uint8_t)(s_set.vf_scale ? 0 : 1);
         settings_changed(&s_set);
+        break;
+    case ROW_FRAME:
+        s_set.frame = (uint8_t)((s_set.frame + 1) % (frames_total() + 1));
+        settings_changed(&s_set);
+        s_frame_preview_until_us = now_us() + FRAME_PREVIEW_MS * 1000LL;
         break;
     case ROW_DC_PALETTE:
         s_set.dc_palette = (uint8_t)((s_set.dc_palette + 1) % DC_PALETTE_COUNT);
@@ -388,8 +425,8 @@ static void cycle_cam_mode(void)
     settings_changed(&s_set);
     s_adjust = ADJUST_0;
     osd_text(s_set.cam_mode == CAM_MODE_GB       ? "GB CAMERA"
-             : s_set.cam_mode == CAM_MODE_DITHER ? "DITHER CAM"
-                                                  : "NORMAL CAM",
+             : s_set.cam_mode == CAM_MODE_DITHER ? "PIXELBOY"
+                                                  : "DIGICAM",
              NULL);
 }
 
@@ -406,12 +443,19 @@ static void rotate_viewfinder(int detents)
             int v = s_set.contrast + detents;
             s_set.contrast = (uint8_t)(v < 0 ? 0 : v > GBCAM_CONTRAST_LEVELS - 1 ? GBCAM_CONTRAST_LEVELS - 1 : v);
             apply_settings(); /* no OSD: the bars on screen show the change */
-        } else {
+        } else if (s_adjust == ADJUST_2) {
             int v = (int)s_set.palette + detents;
             int n = GBCAM_PALETTE_COUNT;
             s_set.palette = (uint8_t)(((v % n) + n) % n);
             apply_settings();
             osd_brief(gbcam_palette_name((gbcam_palette_t)s_set.palette));
+        } else {
+            int v = (int)s_set.frame + detents;
+            int n = frames_total() + 1;
+            s_set.frame = (uint8_t)(((v % n) + n) % n);
+            settings_changed(&s_set);
+            s_frame_preview_until_us = now_us() + FRAME_PREVIEW_MS * 1000LL;
+            osd_brief(s_set.frame == 0 ? "NONE" : frames_get_name(s_set.frame - 1));
         }
     } else if (s_set.cam_mode == CAM_MODE_DITHER) {
         if (s_adjust == ADJUST_0) {
@@ -467,16 +511,16 @@ static void handle_viewfinder_input(const input_event_t *ev)
         break;
     case INPUT_CLICK:
         if (ev->button == BTN_MODE) {
-            /* Dither Cam has four quick-adjust targets; GB and Normal Cam
-             * have three (GB: BRIGHTNESS/CONTRAST/PALETTE, Normal Cam:
-             * BRIGHTNESS/CONTRAST/SIZE). */
-            int count = s_set.cam_mode == CAM_MODE_DITHER ? 4 : 3;
+            /* GB Camera and Dither Cam have four quick-adjust targets; Normal
+             * Cam has three (BRIGHTNESS/CONTRAST/SIZE). */
+            int count = s_set.cam_mode == CAM_MODE_NORMAL ? 3 : 4;
             s_adjust = (adjust_t)((s_adjust + 1) % count);
             if (s_set.cam_mode == CAM_MODE_DITHER)
                 osd_brief(s_adjust == ADJUST_0 ? "AMOUNT" : s_adjust == ADJUST_1 ? "PALETTE"
                         : s_adjust == ADJUST_2 ? "SIZE" : "METHOD");
             else if (s_set.cam_mode == CAM_MODE_GB)
-                osd_brief(s_adjust == ADJUST_0 ? "BRIGHTNESS" : s_adjust == ADJUST_1 ? "CONTRAST" : "PALETTE");
+                osd_brief(s_adjust == ADJUST_0 ? "BRIGHTNESS" : s_adjust == ADJUST_1 ? "CONTRAST"
+                        : s_adjust == ADJUST_2 ? "PALETTE" : "FRAME");
             else
                 osd_brief(s_adjust == ADJUST_0 ? "BRIGHTNESS" : s_adjust == ADJUST_1 ? "CONTRAST" : "SIZE");
         } else if (ev->button == BTN_MENU) {
@@ -557,8 +601,8 @@ static void log_stats(void)
     int64_t t = now_us();
     double n = s_stats.frames, secs = (double)(t - s_stats.t0) / 1e6;
     const char *mode = s_set.cam_mode == CAM_MODE_GB       ? gbcam_style_name(s_cam->settings.style)
-                       : s_set.cam_mode == CAM_MODE_DITHER ? "DITHER CAM"
-                                                            : "NORMAL CAM";
+                       : s_set.cam_mode == CAM_MODE_DITHER ? "PIXELBOY"
+                                                            : "DIGICAM";
     PLOGI(TAG, "%.1f fps (%d skipped) | per frame: wait %.1f ms, sample %.1f ms, look %.1f ms, draw %.1f ms | %s",
           n / secs, s_stats.skipped, s_stats.wait / n / 1000.0, s_stats.process_cam / n / 1000.0,
           s_stats.process_look / n / 1000.0, s_stats.draw / n / 1000.0, mode);
@@ -633,12 +677,25 @@ static void viewfinder_frame(void)
     int64_t t2 = now_us();
 
     if (s_set.cam_mode == CAM_MODE_GB) {
-        display_begin_viewfinder(frozen ? s_still : s_cam->shades, (gbcam_palette_t)s_set.palette,
+        const uint8_t *shades = frozen ? s_still : s_cam->shades;
+        /* The frame only shows at 1:1 (see FRAME_PREVIEW_MS above): a brief
+         * flash at 1:1 when you just changed it even in 2x mode, so you can
+         * see the new choice without leaving the crop you're framing with. */
+        bool native1x = s_set.vf_scale != 0 || now_us() < s_frame_preview_until_us;
+        bool show_frame = native1x && s_set.frame != 0;
+        int framed_w = 0, framed_h = 0;
+        if (show_frame) {
+            const frame_meta_t *fm = frames_get(s_set.frame - 1);
+            frame_size(fm, 1, &framed_w, &framed_h);
+            frame_compose_rgb(fm, shades, (gbcam_palette_t)s_set.palette, 1, s_frame_rgb);
+        }
+        display_begin_viewfinder(shades, (gbcam_palette_t)s_set.palette,
                                  s_set.brightness, GBCAM_BRIGHTNESS_LEVELS - 1,
                                  s_set.contrast, GBCAM_CONTRAST_LEVELS - 1, (int)s_adjust,
-                                 s_set.vf_scale != 0);
+                                 native1x, show_frame ? s_frame_rgb : NULL, framed_w, framed_h);
     } else {
-        display_begin_camera(frozen ? s_still_rgb : s_dc_rgb, s_dc_w, s_dc_h);
+        display_begin_camera(frozen ? s_still_rgb : s_dc_rgb, s_dc_w, s_dc_h,
+                             s_set.cam_mode == CAM_MODE_NORMAL);
     }
     if (s_screen == SCREEN_MENU) draw_menu(); else draw_osd();
     display_end_frame();
@@ -667,7 +724,7 @@ static void gallery_frame(void)
         uint8_t *rgb;
         int w, h;
         if (storage_load_dc(number, &rgb, &w, &h) == ESP_OK) {
-            display_begin_camera(rgb, w, h);
+            display_begin_camera(rgb, w, h, false);
             storage_free_dc(rgb);
         } else {
             display_begin_blank(0, 0, 0);
@@ -681,7 +738,7 @@ static void gallery_frame(void)
 
     char right[16], bottom[24];
     snprintf(right, sizeof right, "%d/%d", s_gallery_pos + 1, storage_count());
-    snprintf(bottom, sizeof bottom, "%s #%d", is_dc ? "DITHER/NORMAL" : "GB CAMERA", number);
+    snprintf(bottom, sizeof bottom, "%s #%d", is_dc ? "PIXELBOY/DIGICAM" : "GB CAMERA", number);
     draw_gallery_overlay("GALLERY", right, bottom);
     draw_osd();
     display_end_frame();
@@ -689,6 +746,17 @@ static void gallery_frame(void)
     /* Keep redrawing while an OSD is up so it disappears on time. */
     s_gallery_dirty = osd_visible;
     plat_sleep_ms(20);
+}
+
+/* frames_sd_init()'s progress callback - shown while it's converting a new
+ * ROM/pack (the first time only; every boot after that just loads the
+ * cached .png, see app_frames_sd.h). */
+static void frames_boot_progress(const char *l1, const char *l2)
+{
+    display_begin_blank(0, 0, 0);
+    display_text(DISP_W / 2 - display_text_width(l1, 2) / 2, 100, 2, l1, 255, 255, 255);
+    if (l2) display_text(DISP_W / 2 - display_text_width(l2, 1) / 2, 130, 1, l2, 200, 200, 200);
+    display_end_frame();
 }
 
 esp_err_t app_init(void)
@@ -726,6 +794,8 @@ esp_err_t app_init(void)
         return err;
     }
     storage_init(); /* runs without an SD card; photos are just unavailable */
+    frames_sd_init(frames_boot_progress); /* SD card's /FRAMES and /ROMS, if any - see app_frames_sd.h */
+    if (s_set.frame > (uint8_t)frames_total()) s_set.frame = 0; /* SD content may have changed since this was saved */
 
     err = camera_init();
     if (err != ESP_OK) {
