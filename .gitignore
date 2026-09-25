@@ -1,0 +1,26 @@
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
+firmware/build.log
+tools/host/*.exe
+tools/host/*.pdb
+tools/host/*.dll
+tools/host/*.lib
+tools/sim/*.dll
+tools/sim/*.lib
+tools/sim/*.pdb
+tools/**/__pycache__/
+sim_data/
+samples/
+tools/**/*.new.dll
+tools/**/*.old-*.dll
+tools/**/*.new.lib
+tools/**/*.new.pdb
+
+# PIXEL CAM is its own separate git repo (github.com/DonaldLSayers/PixelBoy) -
+# not part of this one.
+PIXEL CAM/
+**/__pycache__/
+WIN_20260924_13_49_34_Pro.jpg

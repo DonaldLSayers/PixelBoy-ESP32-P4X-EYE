@@ -1,0 +1,50 @@
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+#include "gbcam.h"
+
+/* Photos live in /sdcard/GBCAM. GB Camera photos are GBnnnnn.BIN (3584-byte
+ * Game Boy 2bpp tiles, palette-free, used by the gallery) plus GBnnnnn.PNG
+ * (4x upscale, shareable). Dither Cam photos are DCnnnnn.PNG (full colour,
+ * nearest-neighbour upscaled by DC_SAVE_SCALE - pixel art, so the upscale and
+ * PNG's lossless colours both matter). Normal Cam photos are DCnnnnn.JPG
+ * instead: it's a real photo, not limited-palette pixel art, so there's
+ * nothing for the 4x upscale to preserve and JPEG's lossy compression costs
+ * little quality for a lot less SD space. The gallery decodes either back to
+ * show them (stb_image reads both), there's no separate tile form for either.
+ * All three kinds share one numbering sequence, so the gallery lists every
+ * photo in the order it was taken regardless of which mode took it. */
+
+esp_err_t storage_init(void);
+bool storage_ready(void);
+
+/* Number of photos, and the photo number / kind at a gallery position
+ * (0 = oldest). */
+int storage_count(void);
+int storage_number_at(int pos);
+bool storage_is_dc_at(int pos);
+
+/* Save the shades; returns the new photo number, or -1 on error. */
+int storage_save(const uint8_t *shades, gbcam_palette_t palette);
+
+esp_err_t storage_load(int number, uint8_t *shades);
+
+/* Dither Cam: nearest-neighbour upscaled by DC_SAVE_SCALE and saved as PNG.
+ * Normal Cam (jpeg=true): saved at its real captured size, no upscale, as a
+ * quality-90 JPEG - see the file-format comment above. Returns the new photo
+ * number, or -1 on error. */
+#define DC_SAVE_SCALE 4
+#define NORMAL_JPEG_QUALITY 90
+int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg);
+
+/* Decodes a saved DCnnnnn.PNG/.JPG back to RGB888 for the gallery (already at
+ * its saved size - typically far bigger than the screen, so display it with
+ * display_begin_camera() the same as the live Dither/Normal Cam view).
+ * *out_rgb must be freed with storage_free_dc(). */
+esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h);
+void storage_free_dc(uint8_t *rgb);
+
+esp_err_t storage_delete(int number, bool is_dc);
