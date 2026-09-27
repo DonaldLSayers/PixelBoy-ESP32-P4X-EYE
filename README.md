@@ -56,7 +56,7 @@ Shutter cancels. Both webcam modes show up as a UVC webcam named "PIXELBOY".
 
 ## Flash
 
-No build needed: [flash from the browser](https://donaldlsayers.github.io/PIXEL-BOY-ALPHA/)
+No build needed: [flash from the browser](https://donaldlsayers.github.io/PixelBoy-ESP32-P4X-EYE/)
 (Chrome/Edge, USB cable into the "Debug" port).
 
 ## Build and flash
