@@ -1,8 +1,15 @@
 /*
- * SD card /FRAMES and /ROMS folders: user-supplied GB Camera borders, loaded
- * once at boot (see app_frames_sd.h) into RAM - after that, selecting or
- * composing a frame is a plain array lookup, same cost regardless of which
- * of these it came from, or from frames.h's built-ins. Source formats:
+ * SD card /FRAMES and /ROMS folders: user-supplied GB Camera borders. Boot
+ * only scans for metadata (name, size, and the /FRAMES/<x>.png path each one
+ * is backed by) - same reasoning as app_palettes_sd.c's LUT caching: with a
+ * couple hundred frames possible across several ROMs/packs, keeping every
+ * one's decoded pixels resident in RAM permanently adds up for something
+ * only ever one of is on screen at a time. The actual pixel data is decoded
+ * from that path on demand, the first time a given frame is selected
+ * (frames_sd_get()), and only the single most-recently-selected frame's
+ * decode is kept around - switching frames re-decodes (a plain PNG, cheap),
+ * it doesn't touch the SD card or re-decode on every viewfinder frame after
+ * that. Source formats:
  *
  *   /FRAMES - .png files the same shape as assets/frames (160x144 or
  *             160x224), quantized the same way tools/gen_frames.py does on
@@ -48,15 +55,46 @@ static const char *TAG = "frames_sd";
 #define PHOTO_H_TILES 14
 #define PHOTO_X_PX 16
 
-static frame_meta_t s_meta[MAX_SD_FRAMES];
+static frame_meta_t s_meta[MAX_SD_FRAMES]; /* .indices is NULL until frames_sd_get() loads it on demand */
 static char s_names[MAX_SD_FRAMES][32]; /* fits the longest FRAME_NAME_OVERRIDES entry (22 chars) with room to spare */
+/* Just the filename, not the full path - every SD frame lives directly in
+ * /FRAMES (see add_frame_ex()), so the directory half is the same for all of
+ * them and not worth repeating 200 times over; frames_sd_get() rebuilds the
+ * full path from s_root when it actually needs it. */
+static char s_filenames[MAX_SD_FRAMES][48];
 static int s_count;
 static char s_root[224];               /* SD mount root, set at the top of frames_sd_init() */
 static frames_sd_progress_cb s_progress;
 
+/* The one frame currently decoded into RAM (whichever was last asked for by
+ * frames_sd_get()) - freed/replaced, never more than one at a time. */
+static int s_cached_index = -1;
+static uint8_t *s_cached_indices;
+
+/* SD filenames often carry underscores in place of spaces (common ROM-set
+ * naming) and "(J)"/"(V1.1)"-style region/version tags - fine as a
+ * filename, just noise in the boot toast, so for display only: swap
+ * underscores for spaces, drop anything in parens, and collapse the
+ * leftover runs of spaces. Nothing that builds paths or file_stem sees
+ * this copy. */
 static void report(const char *l1, const char *l2)
 {
-    if (s_progress) s_progress(l1, l2);
+    if (!s_progress) return;
+    if (!l2) { s_progress(l1, l2); return; }
+    char pretty[40];
+    size_t n = 0;
+    int depth = 0;
+    for (const char *p = l2; *p && n < sizeof pretty - 1; p++) {
+        if (*p == '(') { depth++; continue; }
+        if (*p == ')') { if (depth > 0) depth--; continue; }
+        if (depth > 0) continue;
+        char ch = *p == '_' ? ' ' : *p;
+        if (ch == ' ' && (n == 0 || pretty[n - 1] == ' ')) continue;
+        pretty[n++] = ch;
+    }
+    while (n > 0 && pretty[n - 1] == ' ') n--;
+    pretty[n] = 0;
+    s_progress(l1, pretty);
 }
 
 /* hardware shade index (0=lightest..3=darkest) -> grayscale byte that
@@ -68,14 +106,23 @@ static const uint8_t LEVEL_GRAY[4] = {192, 128, 64, 0};
 
 /* Persists a newly-decoded ROM/pack frame to /FRAMES/<file_stem>.png so
  * future boots load it as a plain PNG instead of re-decoding its source -
- * see app_frames_sd.h. file_stem (unlike the 12-char display name shown in
- * the menu) has room to keep the source ROM/pack in the name, for anyone
- * poking around the SD card later. Best-effort: a write failure (e.g. no
+ * see app_frames_sd.h. file_stem is the short display name itself (e.g.
+ * "GAMEBOY1", "Tiger") - the filename IS the name a later boot reads back
+ * (see load_png()), no separate sidecar to keep in sync. Trade-off: two
+ * different sources that happen to produce the same short name (two
+ * different ROMs' "GAMEBOY1", say) collide on the same cache file - judged
+ * less important than every cached frame just reading right on the SD card
+ * without an extra file next to it. Best-effort: a write failure (e.g. no
  * SD, card full) just means it gets re-decoded again next boot, not a hard
- * error. */
-static void write_frame_png(const char *file_stem, int w, int h, const uint8_t *indices)
+ * error.
+ *
+ * out_path/out_path_sz: filled with the .png path written (even on a write
+ * failure - the caller still needs a path to remember, and everything after
+ * a failed write just fails again the same way if that path's later read
+ * back, no worse off than before this was cached at all). */
+static void write_frame_png(const char *file_stem, int w, int h, const uint8_t *indices,
+                            char *out_path, size_t out_path_sz)
 {
-    if (!s_root[0]) return;
     char safe[48];
     size_t n = 0;
     for (const char *c = file_stem; *c && n < sizeof safe - 1; c++) {
@@ -83,6 +130,8 @@ static void write_frame_png(const char *file_stem, int w, int h, const uint8_t *
         safe[n++] = (isalnum((unsigned char)ch) || ch == '-') ? ch : '_';
     }
     safe[n] = 0;
+    snprintf(out_path, out_path_sz, "%s/FRAMES/%s.png", s_root, safe);
+    if (!s_root[0]) return;
 
     uint8_t *rgb = malloc((size_t)w * h * 3);
     if (!rgb) return;
@@ -90,20 +139,75 @@ static void write_frame_png(const char *file_stem, int w, int h, const uint8_t *
         uint8_t g = LEVEL_GRAY[indices[i] & 3];
         rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = g;
     }
-    char path[300];
-    snprintf(path, sizeof path, "%s/FRAMES/%s.png", s_root, safe);
-    if (!stbi_write_png(path, w, h, 3, rgb, w * 3))
-        PLOGW(TAG, "couldn't write %s", path);
+    if (!stbi_write_png(out_path, w, h, 3, rgb, w * 3))
+        PLOGW(TAG, "couldn't write %s", out_path);
     free(rgb);
 }
 
+/* Same flatten-onto-white + PIL luma weights + round(gray/64) quantizer as
+ * tools/gen_frames.py's quantize(), so a frame looks the same whether it was
+ * baked in at build time or dropped on/decoded onto the SD card. Shared by
+ * the initial scan (PNG sources decode fully up front, to dedupe by pixel
+ * content) and frames_sd_get()'s on-demand reload of whichever frame is
+ * currently selected. */
+static uint8_t *decode_png_to_indices(const char *path, int *out_w, int *out_h, int *out_photo_y)
+{
+    int w, h, comp;
+    uint8_t *rgba = stbi_load(path, &w, &h, &comp, 4);
+    if (!rgba) {
+        PLOGW(TAG, "%s: not a readable PNG", path);
+        return NULL;
+    }
+    if (w != CANVAS_W || (h != 144 && h != 224)) {
+        PLOGW(TAG, "%s: %dx%d, expected 160x144 or 160x224", path, w, h);
+        stbi_image_free(rgba);
+        return NULL;
+    }
+    uint8_t *indices = malloc((size_t)w * h);
+    if (!indices) {
+        stbi_image_free(rgba);
+        return NULL;
+    }
+    for (int i = 0; i < w * h; i++) {
+        uint8_t r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
+        float fr = (r * a + 255.0f * (255 - a)) / 255.0f;
+        float fg = (g * a + 255.0f * (255 - a)) / 255.0f;
+        float fb = (b * a + 255.0f * (255 - a)) / 255.0f;
+        float gray = fr * 0.299f + fg * 0.587f + fb * 0.114f;
+        int level = (int)(gray / 64.0f + 0.5f);
+        level = level < 0 ? 0 : level > 3 ? 3 : level;
+        indices[i] = (uint8_t)(3 - level);
+    }
+    stbi_image_free(rgba);
+    *out_w = w;
+    *out_h = h;
+    *out_photo_y = (h == 144 ? 2 : 5) * 8;
+    return indices;
+}
+
 int frames_sd_count(void) { return s_count; }
+const char *frames_sd_name(int index) { return (index >= 0 && index < s_count) ? s_names[index] : "?"; }
+
+/* Decodes whichever frame is asked for from its /FRAMES/<x>.png (see the
+ * file comment) unless it's already the one cached from the last call -
+ * switching frames re-decodes a plain PNG (cheap), it doesn't re-decode on
+ * every call, so this is fine to call once per viewfinder frame the way
+ * app.c already does. */
 const frame_meta_t *frames_sd_get(int index)
 {
     static const frame_meta_t empty = {CANVAS_W, 144, 16, NULL};
-    return (index >= 0 && index < s_count) ? &s_meta[index] : &empty;
+    if (index < 0 || index >= s_count) return &empty;
+    if (index != s_cached_index) {
+        free(s_cached_indices);
+        char path[300];
+        snprintf(path, sizeof path, "%s/FRAMES/%s", s_root, s_filenames[index]);
+        int w, h, photo_y;
+        s_cached_indices = decode_png_to_indices(path, &w, &h, &photo_y);
+        s_cached_index = s_cached_indices ? index : -1;
+    }
+    s_meta[index].indices = s_cached_indices;
+    return &s_meta[index];
 }
-const char *frames_sd_name(int index) { return (index >= 0 && index < s_count) ? s_names[index] : "?"; }
 
 /* Different ROMs/packs (regions, revisions, a .zip vs. a loose .gb of the
  * same release) routinely share identical frames - dedupe by actual pixel
@@ -129,13 +233,17 @@ static const char *find_duplicate(int w, int h, const uint8_t *indices)
 /* name is the short (<=12 char) name shown in the menu/dial - put whatever
  * actually distinguishes this frame from its siblings first (a slot number,
  * a caption), since it's what survives truncation; a source ROM's own name
- * is usually too long to fit at all, let alone leave room for that. file_stem
- * (only used when persist=true) is the /FRAMES/<file_stem>.png filename,
- * which has much more room - the natural place to keep the source name for
- * anyone browsing the SD card later. PNG/JSON sources call add_frame()
- * instead: persist=false, no file_stem needed, they're already the
- * persistent copy. */
-static bool add_frame_ex(const char *name, const char *file_stem, int w, int h, int photo_y,
+ * is usually too long to fit at all, let alone leave room for that.
+ * file_stem (only used when persist=true) is the /FRAMES/<file_stem>.png
+ * filename, which has much more room - the natural place to keep the source
+ * name for anyone browsing the SD card later. `indices` is only needed
+ * transiently here (for the dedupe check, and to persist=true sources'
+ * write_frame_png()) - it's freed before returning either way, since the
+ * resident copy going forward is whatever frames_sd_get() lazily decodes
+ * from `path`/the written cache file, not this buffer. path is only used
+ * when persist=false (a source that's already its own standalone .png, e.g.
+ * one the user dropped onto the card - nothing to write). */
+static bool add_frame_ex(const char *name, const char *path, const char *file_stem, int w, int h, int photo_y,
                          uint8_t *indices, bool persist)
 {
     const char *dup = find_duplicate(w, h, indices);
@@ -149,55 +257,49 @@ static bool add_frame_ex(const char *name, const char *file_stem, int w, int h, 
         free(indices);
         return false;
     }
-    if (persist) write_frame_png(file_stem, w, h, indices);
-    s_meta[s_count] = (frame_meta_t){w, h, photo_y, indices};
-    snprintf(s_names[s_count], sizeof s_names[s_count], "%s", name);
-    for (char *c = s_names[s_count]; *c; c++) *c = (char)toupper((unsigned char)*c);
+    char written[300];
+    if (persist) {
+        write_frame_png(file_stem, w, h, indices, written, sizeof written);
+        path = written;
+    }
+    s_meta[s_count] = (frame_meta_t){w, h, photo_y, NULL}; /* loaded on demand - see frames_sd_get() */
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    snprintf(s_filenames[s_count], sizeof s_filenames[s_count], "%s", base);
+    free(indices);
+    /* Uppercase, and '-'/'_' (common word separators in a filename) read as
+     * spaces - "game_boy_camera" shows as "GAME BOY CAMERA" (then truncated
+     * to fit, same as any other menu value), not "GAME_BOY_CA". Only ever
+     * affects PNG/JSON sources, whose display name comes from a filename or
+     * pack field - ROM sources' names here are always "STD"/"WILD" + a
+     * number, nothing to replace. */
+    snprintf(s_names[s_count], sizeof s_names[s_count], "%.*s", (int)(sizeof s_names[s_count] - 1), name);
+    for (char *c = s_names[s_count]; *c; c++)
+        *c = (char)((*c == '-' || *c == '_') ? ' ' : toupper((unsigned char)*c));
     s_count++;
     return true;
 }
 
-static bool add_frame(const char *name, int w, int h, int photo_y, uint8_t *indices)
+static bool add_frame_from_file(const char *name, const char *path, int w, int h, int photo_y, uint8_t *indices)
 {
-    return add_frame_ex(name, NULL, w, h, photo_y, indices, false);
+    return add_frame_ex(name, path, NULL, w, h, photo_y, indices, false);
+}
+
+static bool add_frame_persist(const char *name, const char *file_stem, int w, int h, int photo_y, uint8_t *indices)
+{
+    return add_frame_ex(name, NULL, file_stem, w, h, photo_y, indices, true);
 }
 
 /* ---------------------------------------------------------------- PNG in */
 
 static void load_png(const char *path, const char *stem)
 {
-    int w, h, comp;
-    uint8_t *rgba = stbi_load(path, &w, &h, &comp, 4);
-    if (!rgba) {
-        PLOGW(TAG, "%s: not a readable PNG", path);
-        return;
-    }
-    if (w != CANVAS_W || (h != 144 && h != 224)) {
-        PLOGW(TAG, "%s: %dx%d, expected 160x144 or 160x224", path, w, h);
-        stbi_image_free(rgba);
-        return;
-    }
-    int photo_y = (h == 144 ? 2 : 5) * 8;
-    uint8_t *indices = malloc((size_t)w * h);
-    if (!indices) {
-        stbi_image_free(rgba);
-        return;
-    }
-    /* Same flatten-onto-white + PIL luma weights + round(gray/64) quantizer
-     * as tools/gen_frames.py's quantize(), so the same PNG looks the same
-     * whether it was baked in at build time or dropped on the SD card. */
-    for (int i = 0; i < w * h; i++) {
-        uint8_t r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2], a = rgba[i * 4 + 3];
-        float fr = (r * a + 255.0f * (255 - a)) / 255.0f;
-        float fg = (g * a + 255.0f * (255 - a)) / 255.0f;
-        float fb = (b * a + 255.0f * (255 - a)) / 255.0f;
-        float gray = fr * 0.299f + fg * 0.587f + fb * 0.114f;
-        int level = (int)(gray / 64.0f + 0.5f);
-        level = level < 0 ? 0 : level > 3 ? 3 : level;
-        indices[i] = (uint8_t)(3 - level);
-    }
-    stbi_image_free(rgba);
-    add_frame(stem, w, h, photo_y, indices);
+    int w, h, photo_y;
+    uint8_t *indices = decode_png_to_indices(path, &w, &h, &photo_y);
+    if (!indices) return;
+    /* The filename itself is the display name (write_frame_png() names the
+     * cache file that way already) - no separate sidecar to check. */
+    add_frame_from_file(stem, path, w, h, photo_y, indices);
 }
 
 /* --------------------------------------------------------- JSON pack in */
@@ -426,7 +528,7 @@ static void decode_margin_section(const char *arr, uint8_t *canvas, int x0_tiles
     }
 }
 
-static bool decode_sections(const char *buf, const char *end, const char *name)
+static bool decode_sections(const char *buf, const char *end, const char *name, const char *file_stem)
 {
     const char *upper = json_find_key(buf, end, "upper");
     const char *lower = json_find_key(buf, end, "lower");
@@ -457,10 +559,10 @@ static bool decode_sections(const char *buf, const char *end, const char *name)
     decode_margin_section(left, canvas, 0, upper_rows);
     decode_margin_section(right, canvas, (PHOTO_X_PX / 8) + PHOTO_W_TILES, upper_rows);
 
-    return add_frame(name, CANVAS_W, canvas_h, upper_rows * 8, canvas);
+    return add_frame_persist(name, file_stem, CANVAS_W, canvas_h, upper_rows * 8, canvas);
 }
 
-static bool decode_one_frame(const char *p, const char *name)
+static bool decode_one_frame(const char *p, const char *name, const char *file_stem)
 {
     /* p is at the opening quote of the payload string. First pass just
      * measures the raw (still-escaped) span so the buffer can be sized
@@ -482,7 +584,7 @@ static bool decode_one_frame(const char *p, const char *name)
         return false;
     }
 
-    bool ok = decode_sections(inflated, inflated + outlen, name);
+    bool ok = decode_sections(inflated, inflated + outlen, name, file_stem);
     free(inflated);
     return ok;
 }
@@ -563,15 +665,17 @@ static void load_json(const char *path)
             snprintf(key, sizeof key, "frame-%s", hash);
             const char *fv = json_find_key(buf, end, key);
             /* A curated friendly name (see FRAME_NAME_OVERRIDES) if this id
-             * has one; otherwise the id itself (e.g. "wi01") rather than the
-             * pack's own fuller name (e.g. "International 01") - for the
-             * same reason ROM slot names prefer "STD1" over the ROM's own
-             * long title, an unrecognized id is at least short enough to
-             * survive the 12-char display name, where the full name would
-             * just lose its own distinguishing number to truncation. */
+             * has one; otherwise the pack's own "name" field - this newer
+             * framegroup format's names are already short and meant to be
+             * read ("Tiger", "Waves"), unlike the older commercial-cartridge
+             * pack format this override table was originally written for,
+             * where "name" could be a much longer descriptive string (e.g.
+             * "International 01") and the short id ("wi01") was the better
+             * bet to survive the menu's 12-char display width. Falling back
+             * to the id only if this particular entry has no name at all. */
             const char *display = frame_name_override(id);
-            if (!display) display = id[0] ? id : name;
-            if (fv && *fv == '"' && decode_one_frame(fv, display)) n++;
+            if (!display) display = name[0] ? name : id;
+            if (fv && *fv == '"' && decode_one_frame(fv, display, display)) n++;
         }
 
         p = json_skip_ws(obj_end);
@@ -589,6 +693,7 @@ static void load_json(const char *path)
 
 #define ROM_TITLE_OFFSET 0x134
 #define ROM_TITLE_LENGTH 0xF
+#define ROM_DEST_CODE_OFFSET 0x14A /* standard GB header field (Pan Docs) - 0x00 Japan, 0x01 overseas */
 #define STANDARD_FRAME_OFFSET 0xD0000
 #define STANDARD_FRAME_LENGTH 0x600      /* 96 tiles, 16 bytes each */
 #define STANDARD_FRAME_MAP_LENGTH 0x88   /* 136 bytes, one tile index (0-95) per border position */
@@ -707,7 +812,7 @@ static bool rom_build_and_add(const uint8_t *rom, size_t rom_len, const char *na
         }
     }
 
-    return add_frame_ex(name, file_stem, w, h, photo_y_tiles * 8, canvas, true);
+    return add_frame_persist(name, file_stem, w, h, photo_y_tiles * 8, canvas);
 }
 
 static void extract_rom_frames(const uint8_t *rom, size_t rom_len, const char *label)
@@ -718,21 +823,40 @@ static void extract_rom_frames(const uint8_t *rom, size_t rom_len, const char *l
         return;
     }
     bool is_hk = memcmp(rom + ROM_TITLE_OFFSET, HELLO_KITTY_TITLE, ROM_TITLE_LENGTH) == 0;
-    char name[16], file_stem[64];
+    /* Standard GB cartridge header field, not a guess - see Pan Docs. Doesn't
+     * tell us anything about which named frame is which (no verified mapping
+     * from ROM slot order to the community "int01".."int18" list exists, or
+     * this would use it to pick real names, not just log/tag the region). */
+    const char *region = rom[ROM_DEST_CODE_OFFSET] == 0x00 ? "POCKET" : "GAMEBOY"; /* Japan's "Pocket Camera" vs the international "Game Boy Camera" release */
+    PLOGI(TAG, "%s: %s Camera cartridge (destination code 0x%02X)", label, region, rom[ROM_DEST_CODE_OFFSET]);
+    /* Region prefix in the name itself - "POCKET1"/"GAMEBOY W3", not
+     * "STD1"/"WILD3" - since a Pocket Camera (JP) and Game Boy Camera
+     * (overseas) ROM's slots aren't guaranteed to hold the same frame at the
+     * same slot number, this at least tells them apart at a glance instead
+     * of implying they're identical. Longest case ("GAMEBOY W1", 10 chars)
+     * is well under the menu's 12-char display width. */
+    char name[24];
     int found = 0;
 
+    /* file_stem == name (the display name itself doubles as the filename,
+     * e.g. "GAMEBOY1.png"/"POCKET_W3.png" - write_frame_png() turns the
+     * space before a Wild slot's "W3" into an underscore, FAT filenames
+     * being safest without spaces) rather than a longer name carrying the
+     * source ROM's own filename too. Simpler, at the cost of two different
+     * ROMs of the same region (e.g. two distinct Game Boy Camera releases)
+     * colliding on the same cache filename if both are ever loaded - an
+     * edge case judged less important than every ROM's frames just reading
+     * "GAMEBOY1" on the SD card the way they do in the menu. */
     if (is_hk) {
         for (int i = 0; i < 25; i++) {
-            snprintf(name, sizeof name, "STD%d", i + 1);
-            snprintf(file_stem, sizeof file_stem, "%.40s_std%d", label, i + 1);
-            if (rom_build_and_add(rom, rom_len, name, file_stem, HK_STD_OFFSETS[i][0], HK_STD_OFFSETS[i][1],
+            snprintf(name, sizeof name, "%s %d", region, i + 1);
+            if (rom_build_and_add(rom, rom_len, name, name, HK_STD_OFFSETS[i][0], HK_STD_OFFSETS[i][1],
                                   96, STD_POSITIONS, 136, 18, 2))
                 found++;
         }
         for (int i = 0; i < 6; i++) {
-            snprintf(name, sizeof name, "WILD%d", i + 1);
-            snprintf(file_stem, sizeof file_stem, "%.40s_wild%d", label, i + 1);
-            if (rom_build_and_add(rom, rom_len, name, file_stem, HK_WILD_OFFSETS[i], -1,
+            snprintf(name, sizeof name, "%s W%d", region, i + 1);
+            if (rom_build_and_add(rom, rom_len, name, name, HK_WILD_OFFSETS[i], -1,
                                   336, WILD_POSITIONS, 336, 28, 5))
                 found++;
         }
@@ -741,17 +865,15 @@ static void extract_rom_frames(const uint8_t *rom, size_t rom_len, const char *l
             long bank = slot >= 9 ? ROM_BANK_SHIFT : 0;
             int idx = slot < 9 ? slot : slot - 9;
             long base = STANDARD_FRAME_OFFSET + bank + (long)STANDARD_SLOT_LENGTH * idx;
-            snprintf(name, sizeof name, "STD%d", slot + 1);
-            snprintf(file_stem, sizeof file_stem, "%.40s_std%d", label, slot + 1);
-            if (rom_build_and_add(rom, rom_len, name, file_stem, base, base + STANDARD_FRAME_LENGTH,
+            snprintf(name, sizeof name, "%s %d", region, slot + 1);
+            if (rom_build_and_add(rom, rom_len, name, name, base, base + STANDARD_FRAME_LENGTH,
                                   96, STD_POSITIONS, 136, 18, 2))
                 found++;
         }
         for (int slot = 0; slot < WILD_SLOTS; slot++) { /* always slot<9, no bank shift needed */
             long base = WILD_FRAME_OFFSET + (long)WILD_FRAME_LENGTH * slot;
-            snprintf(name, sizeof name, "WILD%d", slot + 1);
-            snprintf(file_stem, sizeof file_stem, "%.40s_wild%d", label, slot + 1);
-            if (rom_build_and_add(rom, rom_len, name, file_stem, base, -1, 336, WILD_POSITIONS, 336, 28, 5))
+            snprintf(name, sizeof name, "%s W%d", region, slot + 1);
+            if (rom_build_and_add(rom, rom_len, name, name, base, -1, 336, WILD_POSITIONS, 336, 28, 5))
                 found++;
         }
     }
@@ -853,9 +975,7 @@ static bool try_gbphoto_rom(const uint8_t *rom, size_t rom_len, const char *labe
         }
         if (!ok) { free(canvas); continue; }
 
-        char file_stem[64];
-        snprintf(file_stem, sizeof file_stem, "%.40s_%s", label, caption);
-        if (add_frame_ex(caption, file_stem, w, h, image_y * 8, canvas, true)) found++;
+        if (add_frame_persist(caption, caption, w, h, image_y * 8, canvas)) found++;
     }
     PLOGI(TAG, "%s: gb-photo ROM, %d frame(s)", label, found);
     return true;
@@ -1057,6 +1177,12 @@ void frames_sd_init(frames_sd_progress_cb progress)
     const char *root = storage_root();
     if (!root[0]) return; /* no SD card */
     snprintf(s_root, sizeof s_root, "%s", root);
+
+    char dir[256];
+    snprintf(dir, sizeof dir, "%s/FRAMES", root);
+    plat_mkdir(dir);
+    snprintf(dir, sizeof dir, "%s/ROMS", root);
+    plat_mkdir(dir);
 
     scan_folder(root, "FRAMES", load_png, load_json, NULL, NULL);
     int after_frames = s_count;

@@ -2,7 +2,14 @@
 
 #include "app_frames.h"
 
-#define MAX_SD_FRAMES 40 /* keep in sync with app_frames_sd.c */
+/* Just a cap on the s_meta/s_names bookkeeping arrays (app_frames_sd.c) -
+ * each slot is ~50 bytes; the actual frame pixel data is heap/PSRAM
+ * allocated separately per frame regardless, so this costs almost nothing
+ * to keep generous. Raised from 40 after it turned out too easy to hit with
+ * more than one or two ROMs/packs on the card at once (a single Standard
+ * cartridge alone uses 18-25 slots before a single /FRAMES .json is even
+ * added). Keep in sync with app_frames_sd.c. */
+#define MAX_SD_FRAMES 200
 
 /* Called (optionally - may be NULL) with a short status line while
  * frames_sd_init() is converting something new, so the caller can show it

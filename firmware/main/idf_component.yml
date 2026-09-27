@@ -4,3 +4,7 @@ dependencies:
   # The "_noglib" variant would avoid LVGL, but 2.0.1/2.0.2 fail to compile
   # (they reference lv_indev_t). LVGL is compiled in but never started.
   espressif/esp32_p4_eye: "^2.0.2"
+  # USB Mass Storage (browse SD card photos from a PC over the "USB" port -
+  # separate from the "Debug" port used for flashing/console, since ESP32-P4
+  # has independent PHYs for USB-OTG and USB-Serial-JTAG).
+  espressif/esp_tinyusb: ">=1.7.0"

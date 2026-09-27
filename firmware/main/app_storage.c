@@ -13,7 +13,7 @@
 static const char *TAG = "storage";
 
 #define MAX_PHOTOS 4096
-#define PNG_SCALE 4
+#define PNG_SCALE GB_PNG_SCALE /* public in app_storage.h - the gallery needs it too, to strip a frame back out */
 
 typedef struct {
     int number;
@@ -222,6 +222,24 @@ esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h)
         path_for(path, sizeof path, "DC", number, "JPG");
         rgb = stbi_load(path, &w, &h, &comp, 3);
     }
+    if (!rgb) return ESP_ERR_NOT_FOUND;
+    *out_rgb = rgb;
+    *out_w = w;
+    *out_h = h;
+    return ESP_OK;
+}
+
+/* Decodes a saved GBnnnnn.PNG back to RGB888 - unlike storage_load()'s .BIN
+ * tiles, this is the actual upscaled export: whatever palette and frame (if
+ * any) the photo was saved with, baked in, not the .BIN's palette-free
+ * shades re-rendered with whatever's currently selected. Frees the same way
+ * as storage_load_dc(). */
+esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *out_h)
+{
+    char path[300];
+    path_for(path, sizeof path, "GB", number, "PNG");
+    int w, h, comp;
+    uint8_t *rgb = stbi_load(path, &w, &h, &comp, 3);
     if (!rgb) return ESP_ERR_NOT_FOUND;
     *out_rgb = rgb;
     *out_w = w;

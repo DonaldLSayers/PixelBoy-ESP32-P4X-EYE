@@ -31,3 +31,15 @@ void *plat_calloc_fast(size_t size);
 /* Mount the photo storage (SD card); writes its root path, e.g. "/sdcard". */
 esp_err_t plat_storage_mount(char *root, size_t len);
 int plat_mkdir(const char *path);
+
+/* Battery charge, 0..100, or -1 if there's no battery/gauge to read (the
+ * simulator, or a board run purely on USB power with nothing plugged into
+ * the battery header). */
+int plat_battery_percent(void);
+
+/* Cuts power to the camera/LCD/SD card and puts the chip into deep sleep,
+ * waking only on the shutter button - a no-op on the simulator (nothing to
+ * power down, nothing to wake from). Never returns on real hardware: a wake
+ * is a full reset, same as power-on, so there's no separate "resume" path -
+ * app_init() just runs again. */
+void plat_enter_deep_sleep(void);

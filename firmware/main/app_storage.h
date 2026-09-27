@@ -30,11 +30,18 @@ bool storage_is_dc_at(int pos);
 
 /* Save the shades; returns the new photo number, or -1 on error. frame is
  * -1 for no border, or a frame_id_t (see frames.h) to bake one into the
- * saved .PNG (frame_compose_rgb(), scaled to PNG_SCALE) - the .BIN tiles the
- * gallery reads back are always just the plain 128x112 photo, unframed. */
+ * saved .PNG (frame_compose_rgb(), scaled to GB_PNG_SCALE) - the .BIN tiles
+ * the gallery reads back are always just the plain 128x112 photo, unframed. */
+#define GB_PNG_SCALE 4
 int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame);
 
 esp_err_t storage_load(int number, uint8_t *shades);
+
+/* Decodes a saved GBnnnnn.PNG back to RGB888 for the gallery's framed 1:1
+ * view - the palette and frame (if any) actually baked in at save time,
+ * unlike storage_load()'s palette-free .BIN tiles. *out_rgb must be freed
+ * with storage_free_dc(). */
+esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *out_h);
 
 /* Dither Cam: nearest-neighbour upscaled by DC_SAVE_SCALE and saved as PNG.
  * Normal Cam (jpeg=true): saved at its real captured size, no upscale, as a
@@ -49,6 +56,7 @@ int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg);
  * display_begin_camera() the same as the live Dither/Normal Cam view).
  * *out_rgb must be freed with storage_free_dc(). */
 esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h);
+/* Also frees a storage_load_gb_png() result - same stbi_image_free() either way. */
 void storage_free_dc(uint8_t *rgb);
 
 esp_err_t storage_delete(int number, bool is_dc);

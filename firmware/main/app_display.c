@@ -1,11 +1,13 @@
 /* Frame composition: image, text, on-screen messages. Platform-neutral;
  * the pixels go out through display_hw (LCD on the board, window in the simulator). */
+#include <stdio.h>
 #include <string.h>
 
 #include "app_display.h"
 #include "display_hw.h"
 #include "font8x8.h"
 #include "icons_data.h"
+#include "platform.h"
 
 static uint16_t *s_fb;
 
@@ -27,6 +29,26 @@ void display_begin_blank(uint8_t r, uint8_t g, uint8_t b)
     uint16_t c = rgb565(r, g, b);
     for (int i = 0; i < DISP_W * DISP_H; i++)
         s_fb[i] = c;
+}
+
+/* True 1:1: one source pixel = one screen pixel, no scaling either way -
+ * centred, cropped if the image is bigger than the screen, letterboxed in
+ * black if it's smaller. Used for the gallery's "inspect the actual saved
+ * pixels" view, as opposed to display_begin_camera()'s fit-to-screen. */
+void display_begin_native(const uint8_t *rgb888, int w, int h)
+{
+    s_fb = display_hw_acquire();
+    for (int i = 0; i < DISP_W * DISP_H; i++) s_fb[i] = 0;
+
+    int cw = w < DISP_W ? w : DISP_W, ch = h < DISP_H ? h : DISP_H;
+    int sx0 = (w - cw) / 2, sy0 = (h - ch) / 2;
+    int dx0 = (DISP_W - cw) / 2, dy0 = (DISP_H - ch) / 2;
+
+    for (int y = 0; y < ch; y++) {
+        const uint8_t *src = rgb888 + (size_t)(sy0 + y) * w * 3 + (size_t)sx0 * 3;
+        uint16_t *dst = s_fb + (size_t)(dy0 + y) * DISP_W + dx0;
+        for (int x = 0; x < cw; x++) dst[x] = rgb565(src[x * 3], src[x * 3 + 1], src[x * 3 + 2]);
+    }
 }
 
 void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette)
@@ -193,29 +215,30 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
     display_text(1, VF_IMG_H - 1, 2, which, fg[0], fg[1], fg[2]);
 }
 
-/* The full frame, aspect preserved (no crop, no stretch) - scaled up to fit
- * the screen as large as it goes, letterboxed in black on whichever axis has
- * room left over (the border is already black from display_begin_camera's
- * clear). Area-averages every destination pixel over its (generally
- * non-integer) source rect - a plain resample. Used for Normal Cam's whole
- * preview (not pixel art, so no aliasing risk) and as PixelBoy's fallback
- * for a size preset whose aspect doesn't crop cleanly onto the square
- * screen (currently just 320x240) - there, it trades the alias-free
- * guarantee for actually filling the screen; the saved photo is unaffected
+/* Aspect preserved (no crop, no stretch) - scaled up to fill the given
+ * screen rect as large as it goes, letterboxed on whichever axis has room
+ * left over (caller must have already cleared that rect - this only ever
+ * writes the fitted image area). Area-averages every destination pixel over
+ * its (generally non-integer) source rect - a plain resample. Used for
+ * Normal Cam's whole preview (not pixel art, so no aliasing risk), as
+ * PixelBoy's fallback for a size preset whose aspect doesn't crop cleanly
+ * onto the square screen (currently just 320x240), and for gallery grid
+ * thumbnails (display_grid_cell()) - there, it trades the alias-free
+ * guarantee for actually filling the cell; the saved photo is unaffected
  * either way, this only changes the preview. */
-static void area_fit(const uint8_t *rgb888, int w, int h)
+static void fit_rect(const uint8_t *rgb888, int w, int h, int rx, int ry, int rw, int rh)
 {
     int ow, oh;
-    if ((int64_t)w * DISP_H > (int64_t)h * DISP_W) {
-        ow = DISP_W;
-        oh = (int)((int64_t)h * DISP_W / w);
+    if ((int64_t)w * rh > (int64_t)h * rw) {
+        ow = rw;
+        oh = (int)((int64_t)h * rw / w);
     } else {
-        oh = DISP_H;
-        ow = (int)((int64_t)w * DISP_H / h);
+        oh = rh;
+        ow = (int)((int64_t)w * rh / h);
     }
     if (ow < 1) ow = 1;
     if (oh < 1) oh = 1;
-    int ox = (DISP_W - ow) / 2, oy = (DISP_H - oh) / 2;
+    int ox = rx + (rw - ow) / 2, oy = ry + (rh - oh) / 2;
 
     for (int dy = 0; dy < oh; dy++) {
         int ya = dy * h / oh;
@@ -243,6 +266,8 @@ static void area_fit(const uint8_t *rgb888, int w, int h)
         }
     }
 }
+
+static void area_fit(const uint8_t *rgb888, int w, int h) { fit_rect(rgb888, w, h, 0, 0, DISP_W, DISP_H); }
 
 void display_begin_camera(const uint8_t *rgb888, int w, int h, bool fill)
 {
@@ -353,6 +378,29 @@ void display_begin_camera(const uint8_t *rgb888, int w, int h, bool fill)
     }
 }
 
+/* Gallery grid view - see app_display.h. No borders/overlay text on the
+ * photos themselves (unlike the single-photo view), just a highlight
+ * around the selected cell. */
+#define GRID_CELL_W (DISP_W / GALLERY_GRID_COLS)
+#define GRID_CELL_H (DISP_H / GALLERY_GRID_ROWS)
+#define GRID_PAD 2 /* gap between cells, and inset for the photo within its cell */
+
+void display_begin_gallery_grid(void)
+{
+    s_fb = display_hw_acquire();
+    for (int i = 0; i < DISP_W * DISP_H; i++) s_fb[i] = 0;
+}
+
+void display_grid_cell(int index, const uint8_t *rgb888, int w, int h, bool selected)
+{
+    int col = index % GALLERY_GRID_COLS, row = index / GALLERY_GRID_COLS;
+    int cx = col * GRID_CELL_W, cy = row * GRID_CELL_H;
+    if (selected)
+        display_rect(cx, cy, GRID_CELL_W, GRID_CELL_H, 255, 255, 255);
+    if (rgb888)
+        fit_rect(rgb888, w, h, cx + GRID_PAD, cy + GRID_PAD, GRID_CELL_W - 2 * GRID_PAD, GRID_CELL_H - 2 * GRID_PAD);
+}
+
 void display_rect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b)
 {
     uint16_t c = rgb565(r, g, b);
@@ -361,7 +409,7 @@ void display_rect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b)
             s_fb[yy * DISP_W + xx] = c;
 }
 
-void display_icon(int x, int y, icon_id_t id)
+void display_icon(int x, int y, icon_id_t id, bool invert)
 {
     for (int iy = 0; iy < ICON_H; iy++) {
         int yy = y + iy;
@@ -374,6 +422,7 @@ void display_icon(int x, int y, icon_id_t id)
             /* icon_pixels[] is plain RGB565 (see gen_icons.py); byte-swap
              * for the panel like rgb565() does for every other draw. */
             uint16_t v = icon_pixels[id][iy][ix];
+            if (invert) v = (uint16_t)~v;
             s_fb[yy * DISP_W + xx] = (uint16_t)((v >> 8) | (v << 8));
         }
     }
@@ -416,6 +465,7 @@ void display_text(int x, int y, int scale, const char *s, uint8_t r, uint8_t g, 
 #define OSD_Y (DISP_IMG_Y + (224 - OSD_H) / 2)
 
 #define MENU_MARGIN 2  /* white border sits this far in from the screen edge */
+#define MENU_MAX_VISIBLE 7  /* rows shown at once before the menu scrolls - see display_menu() */
 
 void display_menu(const char *title, const char *const *labels, const char *const *values,
                   const icon_id_t *icons, int count, int selected)
@@ -427,27 +477,73 @@ void display_menu(const char *title, const char *const *labels, const char *cons
     const int w = DISP_W - 2 * MENU_MARGIN, h = DISP_H - 2 * MENU_MARGIN;
     display_rect(0, 0, DISP_W, DISP_H, 255, 255, 255);
     display_rect(x, y, w, h, 0, 0, 0);
-    display_text(x + w / 2 - display_text_width(title, 2) / 2, y + 7, 2, title, 255, 255, 255);
+    display_text(x + 6, y + (26 - FONT_H * 2) / 2, 2, title, 255, 255, 255);
     display_rect(x + 6, y + 26, w - 12, 1, 255, 255, 255);
 
+    /* Battery, right-justified and vertically centred in the title bar
+     * (the 26px strip above the divider line, same one the title sits in) -
+     * only while a battery/gauge is actually there to read
+     * (plat_battery_percent() returns -1 otherwise, e.g. the simulator or a
+     * USB-only board), so it's never a fake number. */
+    int batt = plat_battery_percent();
+    if (batt >= 0) {
+        char buf[16]; /* plat_battery_percent() is 0..100, but sized for any int so -Wformat-truncation can prove it fits */
+        snprintf(buf, sizeof buf, "%d%%", batt);
+        display_text(x + w - 6 - display_text_width(buf, 1), y + (26 - FONT_H) / 2, 1, buf, 255, 255, 255);
+    }
+
+    /* Fixed row height (sized to fit MENU_MAX_VISIBLE rows) rather than the
+     * available space divided by however many rows this particular menu
+     * has - otherwise a short menu (Digicam's 3 rows: SIZE/GALLERY/EXIT)
+     * stretches its rows to fill the whole box, wasting most of it as dead
+     * space between three widely spaced lines. Rows pack from the top; any
+     * leftover height on a shorter menu just stays black. A menu longer than
+     * that scrolls, keeping the selected row in view (GB Camera's own menu
+     * is the one that needs it, at 8 rows since ROW_SLEEP was added). */
     int rows_top = y + 30, rows_h = h - 30 - 6;
-    int row_h = count > 0 ? rows_h / count : rows_h;
-    /* Icons keep their own colours regardless of selection (display_icon()
-     * doesn't know about fg/bg inversion) - only the label/value text flips
-     * black<->white on the selected row. */
+    int row_h = rows_h / MENU_MAX_VISIBLE;
+    /* Stays put until the selection would run off the bottom of the visible
+     * window, then scrolls just enough to keep it as the last visible row -
+     * not centred, so a short move near the top doesn't scroll at all. */
+    int scroll = 0;
+    if (count > MENU_MAX_VISIBLE) {
+        scroll = selected - MENU_MAX_VISIBLE + 1;
+        if (scroll < 0) scroll = 0;
+        if (scroll > count - MENU_MAX_VISIBLE) scroll = count - MENU_MAX_VISIBLE;
+    }
+    /* Unselected rows sit on black, selected on white - icons (dark art on
+     * transparent) invert to match, same as the label/value text. */
     int text_x = x + 8 + (icons ? ICON_W + 4 : 0);
-    for (int i = 0; i < count; i++) {
-        int ry = rows_top + i * row_h;
+    int last = scroll + MENU_MAX_VISIBLE < count ? scroll + MENU_MAX_VISIBLE : count;
+    for (int i = scroll; i < last; i++) {
+        int ry = rows_top + (i - scroll) * row_h;
         bool sel = i == selected;
         uint8_t fg = sel ? 0 : 255;
-        if (sel) display_rect(x + 3, ry, w - 6, row_h - 2, 255, 255, 255);
-        if (icons) display_icon(x + 6, ry + (row_h - ICON_H) / 2, icons[i]);
+        if (sel) display_rect(x + 3, ry, w - 6 - 8, row_h - 2, 255, 255, 255); /* narrower than the box - see the scrollbar column below */
+        if (icons) display_icon(x + 6, ry + (row_h - ICON_H) / 2, icons[i], !sel);
         /* Scale 1 (native 8px), not 2: at this font's wider advance, a
          * label+value pair at 2x doesn't fit the row without overlapping. */
         int text_y = ry + (row_h - FONT_H) / 2;
         display_text(text_x, text_y, 1, labels[i], fg, fg, fg);
         if (values && values[i])
             display_text(x + w - 8 - display_text_width(values[i], 1), text_y, 1, values[i], fg, fg, fg);
+    }
+
+    /* Scrollbar: a track the height of the visible rows, with a thumb sized
+     * to the visible fraction and positioned to the actual scroll (not just
+     * selected/count - the clamp above means the last screenful lines up
+     * exactly with the bottom, and the thumb should too). Sits in the same
+     * column the selected-row highlight above deliberately stays clear of,
+     * so it's visible over both selected and unselected rows. Drawn only
+     * when this menu actually scrolls, not as a fixed decoration. */
+    if (count > MENU_MAX_VISIBLE) {
+        int track_x = x + w - 7, track_w = 3;
+        display_rect(track_x, rows_top, track_w, rows_h, 80, 80, 80);
+        int max_scroll = count - MENU_MAX_VISIBLE;
+        int thumb_h = rows_h * MENU_MAX_VISIBLE / count;
+        if (thumb_h < 6) thumb_h = 6;
+        int thumb_y = rows_top + (rows_h - thumb_h) * scroll / max_scroll;
+        display_rect(track_x, thumb_y, track_w, thumb_h, 255, 255, 255);
     }
 }
 
@@ -493,6 +589,17 @@ void display_osd(const char *line1, const char *line2)
         if (line1) display_text(DISP_W / 2 - w1 / 2, y + (half - glyph_h) / 2, scale, line1, 255, 255, 255);
         display_text(DISP_W / 2 - w2 / 2, y + half + (half - glyph_h) / 2, scale, line2, 255, 255, 255);
     }
+}
+
+void display_shutter(float progress)
+{
+    if (progress <= 0.0f || progress >= 1.0f) return;
+    /* Triangle wave: 0 at both ends, 1 at progress = 0.5 (fully closed). */
+    float frac = progress < 0.5f ? progress / 0.5f : (1.0f - progress) / 0.5f;
+    int bar_h = (int)(frac * (DISP_H / 2) + 0.5f);
+    if (bar_h <= 0) return;
+    display_rect(0, 0, DISP_W, bar_h, 0, 0, 0);
+    display_rect(0, DISP_H - bar_h, DISP_W, bar_h, 0, 0, 0);
 }
 
 void display_end_frame(void)

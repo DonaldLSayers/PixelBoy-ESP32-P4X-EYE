@@ -164,9 +164,23 @@ void gbcam_tiles_to_shades(const uint8_t tiles[GBCAM_TILES_SIZE], uint8_t *shade
  * (GBCAM_PALETTE_COUNT, GBCAM_PALETTE_DEFAULT in gbcam_palettes.h). */
 typedef uint8_t gbcam_palette_t;
 
-/* RGB888 triple for a shade (0 = white .. 3 = black). */
+/* RGB888 triple for a shade (0 = white .. 3 = black). Indices
+ * >= GBCAM_PALETTE_COUNT are served by the extra-palette callback below, if
+ * one is registered (falls back to GBCAM_PALETTE_DEFAULT otherwise). */
 const uint8_t *gbcam_palette_rgb(gbcam_palette_t p, uint8_t shade);
 const char *gbcam_palette_name(gbcam_palette_t p);
+/* Built-in count plus however many extra palettes are currently registered. */
+int gbcam_palette_count(void);
+
+/* Extra palettes beyond the built-in table (GBCAM_PALETTE_COUNT..count-1) -
+ * for a host that loads user palettes at runtime (e.g. from an SD card);
+ * this component stays platform-neutral and just calls back into whatever
+ * the host registered. index is 0-based within the extra range (already
+ * subtracted from GBCAM_PALETTE_COUNT). Passing count=0 clears it. */
+typedef const uint8_t *(*gbcam_extra_palette_rgb_fn)(int index, uint8_t shade);
+typedef const char *(*gbcam_extra_palette_name_fn)(int index);
+void gbcam_set_extra_palettes(int count, gbcam_extra_palette_rgb_fn rgb_fn,
+                              gbcam_extra_palette_name_fn name_fn);
 
 /* Names for UI / logs. */
 const char *gbcam_style_name(gbcam_style_t s);

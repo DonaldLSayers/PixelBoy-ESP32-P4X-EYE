@@ -15,10 +15,15 @@
  *   Menu button      click: open/close the menu   hold: gallery
  *   Bottom button    click: next camera mode
  * In the menu: encoder turn moves the selection, encoder press activates the
- * row (cycles its value, or runs Gallery/Exit). The gallery lists every
- * photo from every mode, oldest first: encoder scrolls, encoder press goes
- * back, Menu button also goes back, and clicking the Menu button twice
- * deletes the current photo.
+ * row (cycles its value, or runs Gallery/Exit). The gallery opens on a 2x2
+ * thumbnail grid of every photo from every mode, oldest first: encoder
+ * scrolls, Menu button (top) selects - drills into the highlighted photo, or
+ * backs out to the grid from a single photo. A single GB Camera photo opens
+ * 2x cropped with any frame it was saved with stripped back out (matching
+ * the viewfinder's own default view); Mode button (middle) toggles that to
+ * 1x with its frame, if it was saved with one. Bottom button: delete (click
+ * twice to confirm). Shutter (encoder press) always leaves the gallery
+ * entirely and goes back to the camera, from either view.
  */
 #include <math.h>
 #include <stdio.h>
@@ -29,12 +34,15 @@
 #include "gbcam.h"
 #include "app.h"
 #include "app_camera.h"
+#include "camera_ppa_esp.h"
 #include "app_display.h"
 #include "app_frames.h"
 #include "app_frames_sd.h"
 #include "app_input.h"
+#include "app_palettes_sd.h"
 #include "app_settings.h"
 #include "app_storage.h"
+#include "app_usb.h"
 #include "platform.h"
 
 static const char *TAG = "gbcam";
@@ -45,8 +53,8 @@ static const char *TAG = "gbcam";
 #define DELETE_CONFIRM_MS 3000
 #define FRAME_PREVIEW_MS 2000
 
-typedef enum { SCREEN_VIEWFINDER, SCREEN_MENU, SCREEN_GALLERY } screen_t;
-typedef enum { ADJUST_0, ADJUST_1, ADJUST_2, ADJUST_3 } adjust_t;
+typedef enum { SCREEN_VIEWFINDER, SCREEN_MENU, SCREEN_GALLERY, SCREEN_USB } screen_t;
+typedef enum { ADJUST_0, ADJUST_1, ADJUST_2, ADJUST_3, ADJUST_4, ADJUST_5 } adjust_t;
 
 typedef struct {
     char line1[24];
@@ -62,17 +70,31 @@ static osd_t s_osd;
 
 /* Dither Cam / Normal Cam working image: sized for the largest preset
  * (DC_MAX_W x DC_MAX_H), reused at whatever size is actually selected -
- * Normal Cam has its own "digicam" size list, normal_size() in dithercam.h. */
+ * Normal Cam has its own "digicam" size list, normal_size() in dithercam.h.
+ * s_dc_w/h is always the full selected preset (what gets saved); the live
+ * s_dc_rgb buffer itself may be smaller - see s_dc_live_w/h below. */
 static uint8_t *s_dc_rgb;
 static int s_dc_w, s_dc_h;
+/* Normal Cam's live preview size, capped well below its largest presets
+ * (480p/720p) so the viewfinder stays smooth at any preset - see
+ * normal_live_size()'s comment. Same as s_dc_w/h for Dither Cam (already
+ * small at every size) and whenever the selected preset is already under
+ * the cap. take_photo() still captures at the full s_dc_w/h, straight from
+ * a fresh camera frame (dc_capture_cb) - what you see live is a smaller
+ * preview of the same framing, not what actually gets saved. */
+static int s_dc_live_w, s_dc_live_h;
 
-static uint8_t s_still[GBCAM_PIXELS];              /* frozen GB photo / gallery photo */
-static uint8_t *s_still_rgb;                       /* frozen Dither/Normal Cam photo, DC_MAX_W*DC_MAX_H*3 */
-static int64_t s_freeze_until_us;
+static uint8_t *s_still;                           /* GB photo capture buffer, staged for storage_save(), GBCAM_PIXELS */
+static uint8_t *s_still_rgb;                       /* Dither/Normal Cam capture buffer, DC_MAX_W*DC_MAX_H*3 */
+static int64_t s_freeze_until_us;                  /* shutter animation window - see take_photo()/viewfinder_frame() */
 static int64_t s_frame_preview_until_us;            /* see ROW_FRAME in activate_menu_row() */
-static uint8_t s_frame_rgb[160 * 224 * 3];           /* GB Camera framed viewfinder/export canvas, worst case (Wild) */
+static int64_t s_last_input_us;                    /* see ROW_SLEEP/app_step() */
+static uint8_t *s_frame_rgb;                         /* GB Camera framed viewfinder/export canvas, worst case (Wild), 160*224*3 */
 static int s_gallery_pos;
 static bool s_gallery_dirty;
+static bool s_gallery_grid = true;  /* Game Boy Camera's own album view - opens here, drill in with Menu */
+static bool s_gallery_framed;       /* single GB photo view: Mode button toggles 2x crop/no frame vs 1x/with frame */
+static uint8_t *s_gallery_plain_rgb; /* scratch: a saved GB photo with any frame stripped back out, GBCAM_W*GBCAM_H*3 */
 static int64_t s_delete_armed_until_us;
 
 /* ------------------------------------------------------------------- menu */
@@ -81,8 +103,13 @@ typedef enum {
     ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_FRAME, ROW_DC_PALETTE, ROW_DC_METHOD, ROW_DC_SIZE,
     ROW_DC_AMOUNT,
     ROW_NORMAL_SIZE,
-    ROW_DENOISE, ROW_GALLERY, ROW_EXIT
+    ROW_SLEEP,
+    ROW_GALLERY, ROW_EXIT
 } menu_row_t;
+
+/* Auto-sleep timeout choices (see SLEEP_OPTIONS_COUNT in app_settings.h,
+ * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
+static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
 static menu_row_t s_menu_rows[8];
 static int s_menu_count;
@@ -106,6 +133,7 @@ static void osd_brief(const char *l1)
 
 static void draw_osd(void)
 {
+    if (usb_msc_prompt_pending()) { display_osd("USB CONNECTED", "MENU=YES  SHUTTER=NO"); return; }
     if (now_us() > s_osd.until_us) return;
     display_osd(s_osd.line1, s_osd.line2);
 }
@@ -116,7 +144,6 @@ static void apply_settings(void)
     s_cam->settings.contrast = s_set.contrast;
     s_cam->settings.dither = (gbcam_dither_t)s_set.dither;
     s_cam->settings.style = (gbcam_style_t)s_set.style;
-    s_cam->settings.denoise = s_set.denoise;
     gbcam_update_matrix(s_cam);
     settings_changed(&s_set);
 }
@@ -146,33 +173,213 @@ static void brightness_contrast_to_levels(float *contrast, float *gamma)
     *gamma = g < 0.25f ? 0.25f : (g > 4.0f ? 4.0f : g);
 }
 
+/* Normal Cam's live preview, capped to roughly 360p's pixel count (640x360 =
+ * 230,400px) regardless of the selected preset, so 480p/720p stay smooth to
+ * look through - those presets are still what actually gets saved (see
+ * s_dc_live_w/h's comment), just not what the CPU has to touch every single
+ * live frame. Keeps the preset's own aspect ratio (so the live view frames
+ * the same shot the photo will be, just smaller) rather than hardcoding
+ * 640x360 itself, which would only be right for the 16:9 presets. A preset
+ * already at or under the cap (320x240, 360p itself) is used as-is. */
+#define DC_LIVE_MAX_PIXELS (640 * 360)
+static void normal_live_size(int preset_w, int preset_h, int *out_w, int *out_h)
+{
+    long px = (long)preset_w * preset_h;
+    if (px <= DC_LIVE_MAX_PIXELS) {
+        *out_w = preset_w;
+        *out_h = preset_h;
+        return;
+    }
+    float scale = sqrtf((float)DC_LIVE_MAX_PIXELS / (float)px);
+    *out_w = (int)(preset_w * scale + 0.5f);
+    *out_h = (int)(preset_h * scale + 0.5f);
+    if (*out_w < 1) *out_w = 1;
+    if (*out_h < 1) *out_h = 1;
+}
+
 /* ------------------------------------------------------------------ actions */
+
+typedef struct {
+    uint8_t *rgb;
+    int w, h;
+    bool denoise;
+} dc_ctx_t;
+
+static void gb_frame_cb(const gbcam_frame_t *f, void *ctx) { gbcam_downsample((gbcam_t *)ctx, f); }
+
+/* Live preview, both Dither Cam and Normal Cam: plain nearest-neighbour
+ * sampling (dc_sample(), not dc_sample_smooth()) - cheap enough to stay
+ * smooth at any Normal Cam size preset, up to 720p. Normal Cam's own
+ * antialiasing happens once, at capture time, instead - see
+ * dc_capture_cb() below; the live preview being a plainer resample doesn't
+ * affect the saved photo's quality. */
+static void dc_frame_cb(const gbcam_frame_t *f, void *ctx)
+{
+    dc_ctx_t *c = (dc_ctx_t *)ctx;
+    dc_sample(f, c->rgb, c->w, c->h);
+    /* Dither Cam only - see dc_temporal_denoise()'s comment in dithercam.h
+     * for why. Runs on the raw sample, before dc_quantize(). Error diffusion
+     * (Floyd-Steinberg/Atkinson/Sierra Lite, the last three dc_method_t
+     * values) propagates one flipped pixel's error to everything after it
+     * in scan order, so it needs stronger smoothing than Bayer/none to stay
+     * stable. */
+    if (c->denoise) {
+        bool diffusion = s_set.dc_method >= DC_METHOD_FLOYD_STEINBERG;
+        dc_temporal_denoise(c->rgb, c->w, c->h, diffusion ? 3 : 2);
+    }
+}
+
+/* Normal Cam capture only (take_photo()): a fresh full-resolution frame
+ * (the live preview may be a smaller capped size - see s_dc_live_w/h),
+ * still nearest-neighbour like the live preview. Used to be
+ * dc_sample_smooth() (box-averaged, antialiased) instead, on the reasoning
+ * that a real photo deserves the quality the live preview no longer pays
+ * for every frame - true in principle, but at 720p that box-average is the
+ * same per-pixel PSRAM-bound cost that made the live preview slow in the
+ * first place (see dc_temporal_denoise()'s comment history), just paid
+ * once instead of every frame - "once" was still bad enough to make taking
+ * a photo feel like it hangs. Not worth it for a marginal antialiasing
+ * improvement on a downscaled photo. */
+static void dc_capture_cb(const gbcam_frame_t *f, void *ctx)
+{
+    dc_ctx_t *c = (dc_ctx_t *)ctx;
+    dc_sample(f, c->rgb, c->w, c->h);
+}
+
+/* Grabs one live camera frame, processes and draws it exactly like the main
+ * viewfinder loop does (same GB/Dither/Normal branching), with the shutter
+ * curtains overlaid at the given progress (0 = no curtains at all - see
+ * display_shutter()). Shared by viewfinder_frame()'s own per-frame draw and
+ * take_photo()'s closing-curtain animation below, so the preview stays
+ * genuinely live (a fresh grab, not a redraw of a stale buffer) while the
+ * curtains close, not just while they reopen afterward. Returns
+ * camera_grab()'s result - the pacing/frame-skip logic around when to call
+ * this at all stays in viewfinder_frame(), not here.
+ * out_t_grabbed/out_t_processed (either or both may be NULL): timestamps
+ * right after the camera grab and after the process step, for
+ * viewfinder_frame()'s own per-stage perf stats - take_photo()'s animation
+ * loop doesn't care and passes NULL. */
+static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed, int64_t *out_t_processed)
+{
+    esp_err_t err;
+    if (s_set.cam_mode == CAM_MODE_GB) {
+        err = camera_grab(gb_frame_cb, s_cam);
+    } else {
+        bool normal = s_set.cam_mode == CAM_MODE_NORMAL;
+        if (normal) {
+            normal_size(s_set.normal_size, &s_dc_w, &s_dc_h);
+            normal_live_size(s_dc_w, s_dc_h, &s_dc_live_w, &s_dc_live_h);
+        } else {
+            dc_size(s_set.dc_size, &s_dc_w, &s_dc_h);
+            s_dc_live_w = s_dc_w;
+            s_dc_live_h = s_dc_h;
+        }
+        dc_ctx_t ctx = {.rgb = s_dc_rgb, .w = s_dc_live_w, .h = s_dc_live_h, .denoise = !normal};
+        err = camera_grab(dc_frame_cb, &ctx);
+    }
+    if (err != ESP_OK) return err;
+    if (out_t_grabbed) *out_t_grabbed = now_us();
+
+    if (s_set.cam_mode == CAM_MODE_GB) {
+        gbcam_process_luma(s_cam);
+    } else if (s_set.cam_mode == CAM_MODE_DITHER) {
+        float contrast, gamma;
+        brightness_contrast_to_levels(&contrast, &gamma);
+        dc_quantize(s_dc_rgb, s_dc_live_w, s_dc_live_h, s_set.dc_palette, (dc_method_t)s_set.dc_method,
+                   s_set.dc_amount, contrast, gamma, s_dc_rgb, NULL, NULL);
+    } else {
+        float contrast, gamma;
+        brightness_contrast_to_levels(&contrast, &gamma);
+        dc_levels(s_dc_rgb, s_dc_live_w, s_dc_live_h, contrast, gamma);
+    }
+    if (out_t_processed) *out_t_processed = now_us();
+
+    if (s_set.cam_mode == CAM_MODE_GB) {
+        const uint8_t *shades = s_cam->shades;
+        /* The frame only shows at 1:1 (see FRAME_PREVIEW_MS above): a brief
+         * flash at 1:1 when you just changed it even in 2x mode, so you can
+         * see the new choice without leaving the crop you're framing with. */
+        bool native1x = s_set.vf_scale != 0 || now_us() < s_frame_preview_until_us;
+        bool show_frame = native1x && s_set.frame != 0;
+        int framed_w = 0, framed_h = 0;
+        if (show_frame) {
+            const frame_meta_t *fm = frames_get(s_set.frame - 1);
+            frame_size(fm, 1, &framed_w, &framed_h);
+            frame_compose_rgb(fm, shades, (gbcam_palette_t)s_set.palette, 1, s_frame_rgb);
+        }
+        display_begin_viewfinder(shades, (gbcam_palette_t)s_set.palette,
+                                 s_set.brightness, GBCAM_BRIGHTNESS_LEVELS - 1,
+                                 s_set.contrast, GBCAM_CONTRAST_LEVELS - 1, (int)s_adjust,
+                                 native1x, show_frame ? s_frame_rgb : NULL, framed_w, framed_h);
+    } else {
+        display_begin_camera(s_dc_rgb, s_dc_live_w, s_dc_live_h, s_set.cam_mode == CAM_MODE_NORMAL);
+    }
+    display_shutter(shutter_curtain);
+    draw_osd();
+    display_end_frame();
+    return ESP_OK;
+}
 
 static void take_photo(void)
 {
-    s_freeze_until_us = now_us() + FREEZE_MS * 1000LL;
+    /* Instant feedback the moment the shutter is pressed - the capture (a
+     * fresh high-res grab for Normal Cam) and SD card save below are fully
+     * synchronous and can take a real chunk of time, especially at 720p;
+     * nothing renders again until this function returns, so without this
+     * the screen just sits there with no visible response until it's all
+     * done. A real closing sweep (curtains 0 -> 0.5, meeting in the middle),
+     * not a hard cut to black - and the camera preview stays live through
+     * it (grab_process_draw() grabs a fresh frame each step), not frozen on
+     * whatever was on screen the instant the shutter was pressed. */
+    for (int i = 1; i <= 4; i++)
+        if (grab_process_draw(i * 0.125f, NULL, NULL) != ESP_OK) break;
+
     int n;
     if (s_set.cam_mode == CAM_MODE_GB) {
         memcpy(s_still, s_cam->shades, GBCAM_PIXELS);
         int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
         n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame) : -1;
     } else {
-        memcpy(s_still_rgb, s_dc_rgb, (size_t)s_dc_w * s_dc_h * 3);
         bool jpeg = s_set.cam_mode == CAM_MODE_NORMAL;
+        if (jpeg) {
+            /* One properly antialiased resample straight from a fresh
+             * camera frame - see dc_capture_cb()'s comment. Falls back to
+             * the (plain-nearest) live preview buffer on a grab failure
+             * rather than saving nothing. */
+            dc_ctx_t ctx = {.rgb = s_still_rgb, .w = s_dc_w, .h = s_dc_h};
+            if (camera_grab(dc_capture_cb, &ctx) != ESP_OK)
+                memcpy(s_still_rgb, s_dc_rgb, (size_t)s_dc_w * s_dc_h * 3);
+        } else {
+            memcpy(s_still_rgb, s_dc_rgb, (size_t)s_dc_w * s_dc_h * 3);
+        }
         n = storage_ready() ? storage_save_dc(s_still_rgb, s_dc_w, s_dc_h, jpeg) : -1;
     }
+    /* Set only now, after the capture/save work above (which can still take
+     * a real chunk of time - the SD card write especially) - otherwise that
+     * work eats into the window before the shutter-opening animation
+     * (display_shutter(), driven by this same window - see
+     * viewfinder_frame()) even starts, and it either barely plays or
+     * doesn't get a chance to render at all. */
+    s_freeze_until_us = now_us() + FREEZE_MS * 1000LL;
 
     if (!storage_ready()) {
         osd_text("NO SD CARD", NULL);
         return;
     }
-    char buf[24];
-    if (n < 0) {
-        osd_text("SAVE FAILED", NULL);
-    } else {
-        snprintf(buf, sizeof buf, "#%d", n);
-        osd_text("SAVED", buf);
-    }
+    /* No "SAVED" text on success - the shutter animation (display_shutter(),
+     * driven by this same freeze window - see viewfinder_frame()) is the
+     * feedback instead. A real failure past this point is rare enough
+     * (SD write error, card full) that it's still worth a message. */
+    if (n < 0) osd_text("SAVE FAILED", NULL);
+}
+
+static void enter_sleep(void)
+{
+    display_begin_blank(0, 0, 0);
+    display_text(DISP_W / 2 - display_text_width("SLEEPING", 3) / 2, 100, 3, "SLEEPING", 255, 255, 255);
+    display_end_frame();
+    plat_sleep_ms(400); /* let it actually show before the screen cuts out */
+    plat_enter_deep_sleep(); /* cuts camera/LCD/SD power; wakes (as a fresh boot) on Shutter - never returns */
 }
 
 static void enter_gallery(void)
@@ -188,6 +395,8 @@ static void enter_gallery(void)
     camera_pause();  /* nothing live to show browsing photos - see app_camera.h */
     s_screen = SCREEN_GALLERY;
     s_gallery_pos = storage_count() - 1;
+    s_gallery_grid = true;
+    s_gallery_framed = false;
     s_gallery_dirty = true;
     s_delete_armed_until_us = 0;
 }
@@ -197,6 +406,29 @@ static void leave_gallery(void)
     camera_resume();
     s_screen = SCREEN_VIEWFINDER;
     s_osd.until_us = 0;
+}
+
+/* ----------------------------------------------------------------- USB MSC */
+
+static void handle_usb_input(const input_event_t *ev)
+{
+    /* This is the RELIABLE way out, not just a manual shortcut - see
+     * app_usb.c's usb_msc_tick() comment: the actual USB cable being pulled
+     * isn't something this stack can currently detect (a real gap in
+     * TinyUSB's DWC2 driver, not a bug here), so Shutter is what most users
+     * will need every time. Host-initiated disconnects (Windows ejecting
+     * the drive) do still get caught automatically. */
+    if (ev->type == INPUT_CLICK && ev->button == BTN_SHUTTER) usb_msc_exit();
+}
+
+static void usb_screen_frame(void)
+{
+    display_begin_blank(0, 0, 0);
+    const char *l1 = "USB MODE";
+    const char *l2 = "SHUTTER TO EXIT";
+    display_text(DISP_W / 2 - display_text_width(l1, 2) / 2, 90, 2, l1, 255, 255, 255);
+    display_text(DISP_W / 2 - display_text_width(l2, 1) / 2, 120, 1, l2, 200, 200, 200);
+    display_end_frame();
 }
 
 /* --------------------------------------------------------------------- menu */
@@ -228,7 +460,7 @@ static void build_menu(void)
     } else { /* CAM_MODE_NORMAL */
         s_menu_rows[s_menu_count++] = ROW_NORMAL_SIZE;
     }
-    s_menu_rows[s_menu_count++] = ROW_DENOISE;
+    s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
     s_menu_rows[s_menu_count++] = ROW_EXIT;
     if (s_menu_sel >= s_menu_count) s_menu_sel = s_menu_count - 1;
@@ -274,7 +506,7 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "SCALE");
             snprintf(values[i], sizeof values[i], "%s", s_set.vf_scale ? "1:1" : "2X CROP");
             val = values[i];
-            icons[i] = ICON_SCALE;
+            icons[i] = ICON_SIZE;
             break;
         case ROW_FRAME:
             snprintf(labels[i], sizeof labels[i], "FRAME");
@@ -292,7 +524,7 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "METHOD");
             truncate_value(values[i], dc_method_name((dc_method_t)s_set.dc_method));
             val = values[i];
-            icons[i] = ICON_METHOD;
+            icons[i] = ICON_DITHER;
             break;
         case ROW_DC_SIZE: {
             int w, h;
@@ -316,11 +548,12 @@ static void draw_menu(void)
             val = values[i];
             icons[i] = ICON_SIZE;
             break;
-        case ROW_DENOISE:
-            snprintf(labels[i], sizeof labels[i], "DENOISE");
-            snprintf(values[i], sizeof values[i], "%d", s_set.denoise);
+        case ROW_SLEEP:
+            snprintf(labels[i], sizeof labels[i], "SLEEP");
+            if (SLEEP_MINUTES[s_set.sleep_min] == 0) snprintf(values[i], sizeof values[i], "NEVER");
+            else snprintf(values[i], sizeof values[i], "%d MIN", SLEEP_MINUTES[s_set.sleep_min]);
             val = values[i];
-            icons[i] = ICON_DENOISE;
+            icons[i] = ICON_SIZE; /* no dedicated icon - reusing an existing one rather than drawing new art */
             break;
         case ROW_GALLERY:
             snprintf(labels[i], sizeof labels[i], "GALLERY");
@@ -344,7 +577,7 @@ static void activate_menu_row(void)
 {
     switch (s_menu_rows[s_menu_sel]) {
     case ROW_PALETTE:
-        s_set.palette = (uint8_t)((s_set.palette + 1) % GBCAM_PALETTE_COUNT);
+        s_set.palette = (uint8_t)((s_set.palette + 1) % gbcam_palette_count());
         apply_settings();
         break;
     case ROW_DITHER:
@@ -365,7 +598,7 @@ static void activate_menu_row(void)
         s_frame_preview_until_us = now_us() + FRAME_PREVIEW_MS * 1000LL;
         break;
     case ROW_DC_PALETTE:
-        s_set.dc_palette = (uint8_t)((s_set.dc_palette + 1) % DC_PALETTE_COUNT);
+        s_set.dc_palette = (uint8_t)((s_set.dc_palette + 1) % dc_palette_count());
         settings_changed(&s_set);
         break;
     case ROW_DC_METHOD:
@@ -387,9 +620,9 @@ static void activate_menu_row(void)
         s_set.normal_size = (uint8_t)((s_set.normal_size + 1) % NORMAL_SIZE_COUNT);
         settings_changed(&s_set);
         break;
-    case ROW_DENOISE:
-        s_set.denoise = (uint8_t)((s_set.denoise + 1) % 4);
-        apply_settings();
+    case ROW_SLEEP:
+        s_set.sleep_min = (uint8_t)((s_set.sleep_min + 1) % SLEEP_OPTIONS_COUNT);
+        settings_changed(&s_set);
         break;
     case ROW_GALLERY:
         s_screen = SCREEN_VIEWFINDER; /* enter_gallery() switches it again if it succeeds */
@@ -419,11 +652,27 @@ static void handle_menu_input(const input_event_t *ev)
 
 /* -------------------------------------------------------------- viewfinder */
 
+/* GB Camera and Dither Cam have four quick-adjust targets; Normal Cam has
+ * three (BRIGHTNESS/CONTRAST/SIZE). */
+static int adjust_count(uint8_t cam_mode)
+{
+    return cam_mode == CAM_MODE_NORMAL ? 3 : cam_mode == CAM_MODE_DITHER ? 6 : 4;
+}
+
+/* s_set.adjust[] is the saved target per mode; a stale value left over from
+ * a mode with more targets (or a version mismatch) just clamps to 0 rather
+ * than indexing past what that mode actually has. */
+static adjust_t load_adjust(uint8_t cam_mode)
+{
+    int v = s_set.adjust[cam_mode];
+    return (adjust_t)(v < adjust_count(cam_mode) ? v : 0);
+}
+
 static void cycle_cam_mode(void)
 {
     s_set.cam_mode = (uint8_t)((s_set.cam_mode + 1) % CAM_MODE_COUNT);
+    s_adjust = load_adjust(s_set.cam_mode);
     settings_changed(&s_set);
-    s_adjust = ADJUST_0;
     osd_text(s_set.cam_mode == CAM_MODE_GB       ? "GB CAMERA"
              : s_set.cam_mode == CAM_MODE_DITHER ? "PIXELBOY"
                                                   : "DIGICAM",
@@ -445,7 +694,7 @@ static void rotate_viewfinder(int detents)
             apply_settings(); /* no OSD: the bars on screen show the change */
         } else if (s_adjust == ADJUST_2) {
             int v = (int)s_set.palette + detents;
-            int n = GBCAM_PALETTE_COUNT;
+            int n = gbcam_palette_count();
             s_set.palette = (uint8_t)(((v % n) + n) % n);
             apply_settings();
             osd_brief(gbcam_palette_name((gbcam_palette_t)s_set.palette));
@@ -467,7 +716,7 @@ static void rotate_viewfinder(int detents)
             osd_brief(buf);
         } else if (s_adjust == ADJUST_1) {
             int v = (int)s_set.dc_palette + detents;
-            int n = DC_PALETTE_COUNT;
+            int n = dc_palette_count();
             s_set.dc_palette = (uint8_t)(((v % n) + n) % n);
             osd_brief(dc_palette_name(s_set.dc_palette));
         } else if (s_adjust == ADJUST_2) {
@@ -479,11 +728,18 @@ static void rotate_viewfinder(int detents)
             char buf[16];
             snprintf(buf, sizeof buf, "%dX%d", w, h);
             osd_brief(buf);
-        } else {
+        } else if (s_adjust == ADJUST_3) {
             int v = (int)s_set.dc_method + detents;
             int n = DC_METHOD_COUNT;
             s_set.dc_method = (uint8_t)(((v % n) + n) % n);
             osd_brief(dc_method_name((dc_method_t)s_set.dc_method));
+        } else if (s_adjust == ADJUST_4) {
+            int v = s_set.brightness + detents;
+            s_set.brightness = (uint8_t)(v < 0 ? 0 : v > GBCAM_BRIGHTNESS_LEVELS - 1 ? GBCAM_BRIGHTNESS_LEVELS - 1 : v);
+            /* no OSD: the live preview itself shows the change, same as GB/Normal Cam */
+        } else {
+            int v = s_set.contrast + detents;
+            s_set.contrast = (uint8_t)(v < 0 ? 0 : v > GBCAM_CONTRAST_LEVELS - 1 ? GBCAM_CONTRAST_LEVELS - 1 : v);
         }
         settings_changed(&s_set);
     } else { /* CAM_MODE_NORMAL */
@@ -505,19 +761,35 @@ static void rotate_viewfinder(int detents)
 
 static void handle_viewfinder_input(const input_event_t *ev)
 {
+    if (usb_msc_prompt_pending()) {
+        /* Steals input while the prompt is up, same as a normal button click
+         * still would - a photo shouldn't fire underneath it. */
+        if (ev->type == INPUT_CLICK && ev->button == BTN_MENU) {
+            usb_msc_accept();
+            if (usb_msc_active()) {
+                camera_pause(); /* nothing live to show once the SD card's handed to the host */
+                s_screen = SCREEN_USB;
+            } else {
+                osd_text("USB FAILED", NULL); /* see app_usb.c's log for why */
+            }
+        } else if (ev->type == INPUT_CLICK && ev->button == BTN_SHUTTER) {
+            usb_msc_decline();
+        }
+        return;
+    }
     switch (ev->type) {
     case INPUT_PRESS:
         if (ev->button == BTN_SHUTTER) take_photo();
         break;
     case INPUT_CLICK:
         if (ev->button == BTN_MODE) {
-            /* GB Camera and Dither Cam have four quick-adjust targets; Normal
-             * Cam has three (BRIGHTNESS/CONTRAST/SIZE). */
-            int count = s_set.cam_mode == CAM_MODE_NORMAL ? 3 : 4;
-            s_adjust = (adjust_t)((s_adjust + 1) % count);
+            s_adjust = (adjust_t)((s_adjust + 1) % adjust_count(s_set.cam_mode));
+            s_set.adjust[s_set.cam_mode] = (uint8_t)s_adjust;
+            settings_changed(&s_set);
             if (s_set.cam_mode == CAM_MODE_DITHER)
                 osd_brief(s_adjust == ADJUST_0 ? "AMOUNT" : s_adjust == ADJUST_1 ? "PALETTE"
-                        : s_adjust == ADJUST_2 ? "SIZE" : "METHOD");
+                        : s_adjust == ADJUST_2 ? "SIZE" : s_adjust == ADJUST_3 ? "METHOD"
+                        : s_adjust == ADJUST_4 ? "BRIGHTNESS" : "CONTRAST");
             else if (s_set.cam_mode == CAM_MODE_GB)
                 osd_brief(s_adjust == ADJUST_0 ? "BRIGHTNESS" : s_adjust == ADJUST_1 ? "CONTRAST"
                         : s_adjust == ADJUST_2 ? "PALETTE" : "FRAME");
@@ -552,14 +824,27 @@ static void handle_gallery_input(const input_event_t *ev)
         s_gallery_pos = pos < 0 ? 0 : pos > max ? max : pos;
         s_delete_armed_until_us = 0;
         s_osd.until_us = 0;
+        s_gallery_framed = false;
         s_gallery_dirty = true;
         return;
     }
     if (ev->type == INPUT_PRESS && ev->button == BTN_SHUTTER) {
         leave_gallery();
-    } else if (ev->type == INPUT_LONG_PRESS && ev->button == BTN_MENU) {
-        leave_gallery();
     } else if (ev->type == INPUT_CLICK && ev->button == BTN_MENU) {
+        /* Select: grid -> drill into the highlighted photo; single photo ->
+         * back out to the grid, like the real Game Boy Camera's album. */
+        s_gallery_grid = !s_gallery_grid;
+        s_gallery_framed = false;
+        s_gallery_dirty = true;
+    } else if (ev->type == INPUT_CLICK && ev->button == BTN_MODE) {
+        /* Show the GB photo at 1:1, with its frame if one's currently
+         * selected (s_set.frame) - Dither/Normal Cam photos aren't shades,
+         * there's nothing to frame, so this is a no-op for those. */
+        if (!s_gallery_grid && !storage_is_dc_at(s_gallery_pos)) {
+            s_gallery_framed = !s_gallery_framed;
+            s_gallery_dirty = true;
+        }
+    } else if (ev->type == INPUT_CLICK && ev->button == BTN_CAMMODE) {
         if (now_us() < s_delete_armed_until_us) {
             storage_delete(storage_number_at(s_gallery_pos), storage_is_dc_at(s_gallery_pos));
             s_delete_armed_until_us = 0;
@@ -610,19 +895,24 @@ static void log_stats(void)
     s_stats.t0 = t;
 }
 
-static void gb_frame_cb(const gbcam_frame_t *f, void *ctx) { gbcam_downsample((gbcam_t *)ctx, f); }
+/* Edge-triggered so it warns once per drop below the threshold, not every
+ * frame - and can warn again on a later drop (e.g. it recovered because the
+ * board got plugged in to charge, then was unplugged and ran back down). */
+#define LOW_BATTERY_PCT 15
+static bool s_low_battery_warned;
 
-typedef struct {
-    uint8_t *rgb;
-    int w, h;
-    bool smooth;
-} dc_ctx_t;
-
-static void dc_frame_cb(const gbcam_frame_t *f, void *ctx)
+static void check_low_battery(void)
 {
-    dc_ctx_t *c = (dc_ctx_t *)ctx;
-    if (c->smooth) dc_sample_smooth(f, c->rgb, c->w, c->h);
-    else dc_sample(f, c->rgb, c->w, c->h);
+    int pct = plat_battery_percent();
+    if (pct < 0) return; /* no gauge to read - nothing to warn about */
+    if (pct <= LOW_BATTERY_PCT) {
+        if (!s_low_battery_warned) {
+            s_low_battery_warned = true;
+            osd_text("LOW BATTERY", NULL);
+        }
+    } else {
+        s_low_battery_warned = false;
+    }
 }
 
 static void viewfinder_frame(void)
@@ -633,6 +923,7 @@ static void viewfinder_frame(void)
         s_stats.skipped++;
         return;
     }
+    check_low_battery();
     s_next_frame_us = (s_next_frame_us && t0 - s_next_frame_us < FRAME_INTERVAL_US)
                           ? s_next_frame_us + FRAME_INTERVAL_US : t0 + FRAME_INTERVAL_US;
 
@@ -647,58 +938,41 @@ static void viewfinder_frame(void)
         return;
     }
 
-    esp_err_t err;
-    if (s_set.cam_mode == CAM_MODE_GB) {
-        err = camera_grab(gb_frame_cb, s_cam);
-    } else {
-        bool normal = s_set.cam_mode == CAM_MODE_NORMAL;
-        if (normal) normal_size(s_set.normal_size, &s_dc_w, &s_dc_h);
-        else dc_size(s_set.dc_size, &s_dc_w, &s_dc_h);
-        dc_ctx_t ctx = {.rgb = s_dc_rgb, .w = s_dc_w, .h = s_dc_h, .smooth = normal};
-        err = camera_grab(dc_frame_cb, &ctx);
+    /* No freeze-frame review of the just-taken photo any more - just the
+     * shutter animation over whatever's live right now (see take_photo()'s
+     * comment). s_still/s_still_rgb still exist as the actual save buffers
+     * (storage_save()/storage_save_dc() read from them), just not shown. */
+    float shutter_curtain = 0.0f; /* 0 = no curtains - see display_shutter() */
+    if (now_us() < s_freeze_until_us) {
+        /* Opening half only (progress 0.5..1.0) - take_photo() already
+         * closed the curtains itself (its own grab_process_draw() calls,
+         * ramping 0 -> 0.5) before the slow capture/save work, so this just
+         * continues smoothly from there to fully open, rather than
+         * restarting the whole close-then-open cycle and visibly jumping
+         * from closed straight to open on the first post-capture frame.
+         * Runs out exactly when s_freeze_until_us does - same window, no
+         * separate timer (see take_photo()/FREEZE_MS). */
+        float frac = 1.0f - (float)(s_freeze_until_us - now_us()) / (FREEZE_MS * 1000.0f);
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        shutter_curtain = 0.5f + 0.5f * frac;
     }
-    if (err != ESP_OK) {
+    int64_t t1, t2;
+    if (grab_process_draw(shutter_curtain, &t1, &t2) != ESP_OK) {
         plat_sleep_ms(10);
         return;
     }
-    int64_t t1 = now_us();
 
-    bool frozen = now_us() < s_freeze_until_us;
-    if (s_set.cam_mode == CAM_MODE_GB) {
-        gbcam_process_luma(s_cam);
-    } else if (s_set.cam_mode == CAM_MODE_DITHER) {
-        dc_quantize(s_dc_rgb, s_dc_w, s_dc_h, s_set.dc_palette, (dc_method_t)s_set.dc_method,
-                   s_set.dc_amount, 1.0f, 1.0f, s_dc_rgb, NULL, NULL);
-    } else {
-        float contrast, gamma;
-        brightness_contrast_to_levels(&contrast, &gamma);
-        dc_levels(s_dc_rgb, s_dc_w, s_dc_h, contrast, gamma);
-    }
-    int64_t t2 = now_us();
-
-    if (s_set.cam_mode == CAM_MODE_GB) {
-        const uint8_t *shades = frozen ? s_still : s_cam->shades;
-        /* The frame only shows at 1:1 (see FRAME_PREVIEW_MS above): a brief
-         * flash at 1:1 when you just changed it even in 2x mode, so you can
-         * see the new choice without leaving the crop you're framing with. */
-        bool native1x = s_set.vf_scale != 0 || now_us() < s_frame_preview_until_us;
-        bool show_frame = native1x && s_set.frame != 0;
-        int framed_w = 0, framed_h = 0;
-        if (show_frame) {
-            const frame_meta_t *fm = frames_get(s_set.frame - 1);
-            frame_size(fm, 1, &framed_w, &framed_h);
-            frame_compose_rgb(fm, shades, (gbcam_palette_t)s_set.palette, 1, s_frame_rgb);
-        }
-        display_begin_viewfinder(shades, (gbcam_palette_t)s_set.palette,
-                                 s_set.brightness, GBCAM_BRIGHTNESS_LEVELS - 1,
-                                 s_set.contrast, GBCAM_CONTRAST_LEVELS - 1, (int)s_adjust,
-                                 native1x, show_frame ? s_frame_rgb : NULL, framed_w, framed_h);
-    } else {
-        display_begin_camera(frozen ? s_still_rgb : s_dc_rgb, s_dc_w, s_dc_h,
-                             s_set.cam_mode == CAM_MODE_NORMAL);
-    }
-    if (s_screen == SCREEN_MENU) draw_menu(); else draw_osd();
-    display_end_frame();
+    /* Unconditional, not just on the "we're ahead of schedule" path above -
+     * when a frame genuinely takes longer than the pacing target (a slow
+     * Digicam preset can run well behind it), t0 is never < s_next_frame_us
+     * and that's the ONLY other place this loop ever sleeps, so without this
+     * the idle task can go without a timeslice for as long as frames keep
+     * arriving late - which is exactly when it's most likely to happen,
+     * and starves the idle task's own watchdog reset until it fires. 1ms is
+     * enough for the scheduler to run something else without being a real
+     * frame-rate cost. */
+    plat_sleep_ms(1);
 
     int64_t proc = camera_last_process_us();
     s_stats.process_cam += proc;
@@ -706,6 +980,101 @@ static void viewfinder_frame(void)
     s_stats.process_look += t2 - t1;
     s_stats.draw += now_us() - t2;
     if (++s_stats.frames == STATS_FRAMES) log_stats();
+}
+
+/* A saved GBnnnnn.PNG may have a frame baked in (storage_save()'s
+ * frame_compose_rgb() call, at GB_PNG_SCALE) - the plain 128x112 photo sits
+ * at a fixed, frame-geometry-dependent offset inside it (frames.h's
+ * FRAME_PHOTO_X and frame_meta_t's photo_y - one of gen_frames.py's two
+ * supported canvas heights, 144 or 224). Which offset applies is worked out
+ * purely from the loaded PNG's own dimensions - nothing about which frame
+ * (if any) was used needs to be known or stored per photo, since there are
+ * only ever these three possible saved sizes. Fills s_gallery_plain_rgb
+ * (128x112) with the plain photo, downsampling the 4x4 solid blocks
+ * GB_PNG_SCALE's nearest-neighbour upscale left behind back to 1x1 each. */
+static void extract_plain_photo(const uint8_t *rgb, int w, int h)
+{
+    int photo_x = 0, photo_y = 0;
+    if (w == GBCAM_W * GB_PNG_SCALE && h == GBCAM_H * GB_PNG_SCALE) {
+        /* unframed - already just the photo */
+    } else if (h == 144 * GB_PNG_SCALE) {
+        photo_x = FRAME_PHOTO_X * GB_PNG_SCALE;
+        photo_y = 2 * 8 * GB_PNG_SCALE;
+    } else if (h == 224 * GB_PNG_SCALE) {
+        photo_x = FRAME_PHOTO_X * GB_PNG_SCALE;
+        photo_y = 5 * 8 * GB_PNG_SCALE;
+    } /* else: unrecognised size (corrupt/foreign file) - best effort, top-left crop */
+
+    for (int oy = 0; oy < GBCAM_H; oy++) {
+        const uint8_t *src = rgb + (size_t)(photo_y + oy * GB_PNG_SCALE) * w * 3 + (size_t)photo_x * 3;
+        uint8_t *dst = s_gallery_plain_rgb + (size_t)oy * GBCAM_W * 3;
+        for (int ox = 0; ox < GBCAM_W; ox++) {
+            const uint8_t *s = src + (size_t)ox * GB_PNG_SCALE * 3;
+            dst[ox * 3 + 0] = s[0];
+            dst[ox * 3 + 1] = s[1];
+            dst[ox * 3 + 2] = s[2];
+        }
+    }
+}
+
+/* The saved PNG is GB_PNG_SCALE upscaled (storage_save()) - "1x" for the
+ * Mode-button gallery view means the original canvas resolution (the frame's
+ * own 160x144/160x224, or 128x112 unframed), one canvas pixel per screen
+ * pixel, not one (already 4x-oversized) PNG pixel per screen pixel - that
+ * would just be a zoomed-in crop of a quarter of the image. Downscales by
+ * picking one sample per GB_PNG_SCALE x GB_PNG_SCALE block (already solid
+ * colour, from the original nearest-neighbour upscale) into s_frame_rgb,
+ * reused here since its size (the biggest canvas, Wild frames) covers every
+ * case. w/h out are the resulting native size. */
+static void downscale_to_native(const uint8_t *rgb, int w, int h, int *out_w, int *out_h)
+{
+    int nw = w / GB_PNG_SCALE, nh = h / GB_PNG_SCALE;
+    for (int y = 0; y < nh; y++) {
+        const uint8_t *src = rgb + (size_t)(y * GB_PNG_SCALE) * w * 3;
+        uint8_t *dst = s_frame_rgb + (size_t)y * nw * 3;
+        for (int x = 0; x < nw; x++)
+            memcpy(dst + (size_t)x * 3, src + (size_t)(x * GB_PNG_SCALE) * 3, 3);
+    }
+    *out_w = nw;
+    *out_h = nh;
+}
+
+static void gallery_grid_frame(void)
+{
+    display_begin_gallery_grid();
+    int page = (s_gallery_pos / GALLERY_GRID_CELLS) * GALLERY_GRID_CELLS;
+    for (int i = 0; i < GALLERY_GRID_CELLS; i++) {
+        int pos = page + i;
+        if (pos >= storage_count()) {
+            display_grid_cell(i, NULL, 0, 0, false);
+            continue;
+        }
+        int number = storage_number_at(pos);
+        bool is_dc = storage_is_dc_at(pos);
+        bool selected = pos == s_gallery_pos;
+        if (is_dc) {
+            uint8_t *rgb;
+            int w, h;
+            if (storage_load_dc(number, &rgb, &w, &h) == ESP_OK) {
+                display_grid_cell(i, rgb, w, h, selected);
+                storage_free_dc(rgb);
+            } else {
+                display_grid_cell(i, NULL, 0, 0, selected);
+            }
+        } else {
+            /* The saved GBnnnnn.PNG, same reasoning as the single-photo view
+             * below - the actual saved palette/frame, not whatever's
+             * currently selected. */
+            uint8_t *rgb;
+            int w, h;
+            if (storage_load_gb_png(number, &rgb, &w, &h) == ESP_OK) {
+                display_grid_cell(i, rgb, w, h, selected);
+                storage_free_dc(rgb);
+            } else {
+                display_grid_cell(i, NULL, 0, 0, selected);
+            }
+        }
+    }
 }
 
 static void gallery_frame(void)
@@ -716,6 +1085,15 @@ static void gallery_frame(void)
         return;
     }
     if (s_delete_armed_until_us && now_us() >= s_delete_armed_until_us) s_delete_armed_until_us = 0;
+
+    if (s_gallery_grid) {
+        gallery_grid_frame();
+        draw_osd();
+        display_end_frame();
+        s_gallery_dirty = osd_visible;
+        plat_sleep_ms(20);
+        return;
+    }
 
     int number = storage_number_at(s_gallery_pos);
     bool is_dc = storage_is_dc_at(s_gallery_pos);
@@ -730,10 +1108,28 @@ static void gallery_frame(void)
             display_begin_blank(0, 0, 0);
         }
     } else {
-        if (storage_load(number, s_still) != ESP_OK) memset(s_still, 0, sizeof s_still);
-        /* Palette-free tiles, shown in whatever palette is currently
-         * selected - not necessarily the one the photo was taken in. */
-        display_begin_frame(s_still, (gbcam_palette_t)s_set.palette);
+        /* The actual saved GBnnnnn.PNG, not a recompose from the .BIN's
+         * palette-free shades against whatever palette/frame happen to be
+         * selected right now - this always shows the photo exactly as it
+         * was saved, in both views. Default: the plain photo (any frame
+         * stripped back out - see extract_plain_photo()), 2x cropped, like
+         * the viewfinder's own default view. Mode button (s_gallery_framed):
+         * 1x, with its frame if it was saved with one. */
+        uint8_t *rgb;
+        int w, h;
+        if (storage_load_gb_png(number, &rgb, &w, &h) == ESP_OK) {
+            if (s_gallery_framed) {
+                int nw, nh;
+                downscale_to_native(rgb, w, h, &nw, &nh);
+                display_begin_native(s_frame_rgb, nw, nh);
+            } else {
+                extract_plain_photo(rgb, w, h);
+                display_begin_camera(s_gallery_plain_rgb, GBCAM_W, GBCAM_H, false);
+            }
+            storage_free_dc(rgb);
+        } else {
+            display_begin_blank(0, 0, 0);
+        }
     }
 
     char right[16], bottom[24];
@@ -762,11 +1158,21 @@ static void frames_boot_progress(const char *l1, const char *l2)
 esp_err_t app_init(void)
 {
     settings_load(&s_set);
+    s_adjust = load_adjust(s_set.cam_mode);
 
     s_cam = plat_calloc_fast(sizeof(gbcam_t));
     s_dc_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
     s_still_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
-    if (!s_cam || !s_dc_rgb || !s_still_rgb) {
+    /* These three used to be plain static arrays (~165KB combined) - fine on
+     * a desktop, but on this board that's ~165KB permanently reserved out of
+     * a small internal RAM budget, whether or not a frame's actually being
+     * processed right now. calloc() puts anything over 16KB in PSRAM
+     * automatically (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL - see
+     * sdkconfig.defaults), same as s_dc_rgb/s_still_rgb above already did. */
+    s_still = calloc(1, GBCAM_PIXELS);
+    s_frame_rgb = calloc(1, 160 * 224 * 3);
+    s_gallery_plain_rgb = calloc(1, GBCAM_W * GBCAM_H * 3);
+    if (!s_cam || !s_dc_rgb || !s_still_rgb || !s_still || !s_frame_rgb || !s_gallery_plain_rgb) {
         PLOGE(TAG, "no memory");
         return ESP_ERR_NO_MEM;
     }
@@ -785,7 +1191,7 @@ esp_err_t app_init(void)
         return err;
     }
     display_begin_blank(0, 0, 0);
-    display_text(DISP_W / 2 - display_text_width("GB CAMERA", 3) / 2, 100, 3, "GB CAMERA", 255, 255, 255);
+    display_text(DISP_W / 2 - display_text_width("PIXELBOY", 3) / 2, 100, 3, "PIXELBOY", 255, 255, 255);
     display_end_frame();
 
     err = input_init();
@@ -794,8 +1200,23 @@ esp_err_t app_init(void)
         return err;
     }
     storage_init(); /* runs without an SD card; photos are just unavailable */
+    /* Warn now, not just the first time Shutter is pressed - so it's known
+     * before shooting starts, not after. No SD card also means no /FRAMES,
+     * /ROMS or /PALETTES to scan, so nothing slow follows this that could
+     * make the message expire before the live viewfinder is even up. */
+    if (!storage_ready()) osd_text("NO SD CARD", NULL);
     frames_sd_init(frames_boot_progress); /* SD card's /FRAMES and /ROMS, if any - see app_frames_sd.h */
     if (s_set.frame > (uint8_t)frames_total()) s_set.frame = 0; /* SD content may have changed since this was saved */
+
+    palettes_sd_init(); /* SD card's /PALETTES, if any - see app_palettes_sd.h */
+    gbcam_set_extra_palettes(palettes_sd_gb_count(), palettes_sd_gb_rgb, palettes_sd_gb_name);
+    dc_set_extra_palettes(palettes_sd_dc_count(), palettes_sd_dc_colors, palettes_sd_dc_name);
+    dc_set_extra_lut_io(palettes_sd_load_lut, palettes_sd_save_lut); /* cache each one's nearest-colour LUT on the SD card, not RAM */
+    if (s_set.palette >= (uint8_t)gbcam_palette_count()) s_set.palette = GBCAM_PALETTE_DEFAULT;
+    if (s_set.dc_palette >= (uint8_t)dc_palette_count()) s_set.dc_palette = DC_PALETTE_DEFAULT;
+
+    err = usb_msc_init();
+    if (err != ESP_OK) PLOGW(TAG, "USB MSC init failed: %s - USB photo browsing unavailable", esp_err_to_name(err));
 
     err = camera_init();
     if (err != ESP_OK) {
@@ -805,21 +1226,47 @@ esp_err_t app_init(void)
         display_end_frame();
         return err;
     }
+    /* camera_ppa_init(); - disabled for now: real hardware showed visible
+     * corruption (right/bottom of frame) with no measurable speed win over
+     * the CPU path either, so this isn't earning its risk yet. Code stays
+     * in place (camera_ppa_esp.c) for a more careful follow-up pass -
+     * needs figuring out why before it's worth turning back on. */
 
     s_stats.t0 = now_us();
+    s_last_input_us = now_us(); /* don't count boot itself as idle time - see ROW_SLEEP */
     return ESP_OK;
 }
 
 void app_step(void)
 {
+    usb_msc_tick();
+    if (s_screen == SCREEN_USB && !usb_msc_active()) {
+        /* Cable pulled, or the host ejected/released the drive on its own -
+         * usb_msc_tick() already tore the handoff down, just leave the
+         * dedicated screen. */
+        camera_resume();
+        s_screen = SCREEN_VIEWFINDER;
+    }
+
     input_event_t ev;
     while (input_get(&ev, 0)) {
-        if (s_screen == SCREEN_VIEWFINDER) handle_viewfinder_input(&ev);
+        s_last_input_us = now_us();
+        if (s_screen == SCREEN_USB) handle_usb_input(&ev);
+        else if (s_screen == SCREEN_VIEWFINDER) handle_viewfinder_input(&ev);
         else if (s_screen == SCREEN_MENU) handle_menu_input(&ev);
         else handle_gallery_input(&ev);
     }
 
+    /* Not while the SD card's handed to a PC (s_screen==SCREEN_USB implies
+     * usb_msc_active(), given app_step()'s own check above) - cutting power
+     * mid-transfer would be a bad surprise, not just an inconvenience. sleep_min
+     * of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
+    int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
+    if (sleep_min != 0 && s_screen != SCREEN_USB &&
+        now_us() - s_last_input_us > (int64_t)sleep_min * 60 * 1000000LL) enter_sleep();
+
     if (s_screen == SCREEN_GALLERY) gallery_frame();
+    else if (s_screen == SCREEN_USB) usb_screen_frame();
     else viewfinder_frame(); /* also drives SCREEN_MENU, so the feed keeps live behind it */
 
     settings_tick();

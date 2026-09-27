@@ -20,16 +20,20 @@ static const uint16_t dc_sizes[DC_SIZE_COUNT][2] = {
 };
 
 /* Normal Cam's "digicam" presets - see the NORMAL_SIZE_COUNT comment in
- * dithercam.h for why these are separate from dc_sizes[] and capped at 720p. */
+ * dithercam.h for why these are separate from dc_sizes[], 4:3-only, and
+ * capped at 640x480. Ascending pixel count. */
 static const uint16_t normal_sizes[NORMAL_SIZE_COUNT][2] = {
-    {320, 240}, {640, 360}, {640, 480}, {854, 480}, {1280, 720},
+    {320, 240}, {480, 360}, {640, 480},
 };
 static const char *const normal_size_labels[NORMAL_SIZE_COUNT] = {
-    "320X240", "360P", "480P", "480P WIDE", "720P",
+    "320X240", "480X360", "640X480",
 };
 
 static const char *const method_names[DC_METHOD_COUNT] = {
-    "NONE", "BAYER 4X4", "BAYER 8X8", "FLOYD-ST", "ATKINSON", "SIERRA LITE",
+    "NONE", "BAYER 4X4", "BAYER 8X8", "FLOYD-STEINBERG", "ATKINSON", "SIERRA LITE",
+    /* Floyd-Steinberg's hyphen is part of the two names it's actually called
+     * after, unlike a filename's - it stays; the menu row still truncates it
+     * (truncate_value(), 11 chars) but the OSD popup shows it in full. */
 };
 
 /* Recursive Bayer matrices (M2 = [[0,2],[3,1]]), dithercam.py _generate_bayer_matrix. */
@@ -74,13 +78,48 @@ const char *dc_method_name(dc_method_t m)
     return (m < DC_METHOD_COUNT) ? method_names[m] : "?";
 }
 
+static int s_extra_count;
+static dc_extra_palette_fn s_extra_colors;
+static dc_extra_palette_name_fn s_extra_name;
+
+/* Only the currently-selected extra palette's LUT is ever in RAM - see
+ * ensure_active_lut() below and dc_set_extra_lut_io()'s comment in
+ * dithercam.h for why. */
+static dc_extra_lut_load_fn s_lut_load;
+static dc_extra_lut_save_fn s_lut_save;
+static int s_active_extra_idx = -1;
+static uint8_t *s_active_lut;
+
+void dc_set_extra_palettes(int count, dc_extra_palette_fn colors_fn, dc_extra_palette_name_fn name_fn)
+{
+    free(s_active_lut);
+    s_active_lut = NULL;
+    s_active_extra_idx = -1;
+    s_extra_count = count > 0 ? count : 0;
+    s_extra_colors = colors_fn;
+    s_extra_name = name_fn;
+}
+
+void dc_set_extra_lut_io(dc_extra_lut_load_fn load_fn, dc_extra_lut_save_fn save_fn)
+{
+    s_lut_load = load_fn;
+    s_lut_save = save_fn;
+}
+
+int dc_palette_count(void) { return DC_PALETTE_COUNT + s_extra_count; }
+
 const char *dc_palette_name(int p)
 {
-    return (p >= 0 && p < DC_PALETTE_COUNT) ? dc_palette_names[p] : "?";
+    if (p >= 0 && p < DC_PALETTE_COUNT) return dc_palette_names[p];
+    if (p >= DC_PALETTE_COUNT && p < DC_PALETTE_COUNT + s_extra_count && s_extra_name)
+        return s_extra_name(p - DC_PALETTE_COUNT);
+    return "?";
 }
 
 int dc_palette_colors(int p, const uint8_t (**colors)[3])
 {
+    if (p >= DC_PALETTE_COUNT && p < DC_PALETTE_COUNT + s_extra_count && s_extra_colors)
+        return s_extra_colors(p - DC_PALETTE_COUNT, colors);
     if (p < 0 || p >= DC_PALETTE_COUNT) p = DC_PALETTE_DEFAULT;
     *colors = &dc_palette_rgb[dc_palette_offset[p]];
     return dc_palette_size[p];
@@ -133,10 +172,14 @@ static int frame_stride(const gbcam_frame_t *f)
     return f->width * (f->format == GBCAM_FMT_GREY8 ? 1 : f->format == GBCAM_FMT_RGB888 ? 3 : 2);
 }
 
+static dc_hw_resample_fn s_hw_resample;
+void dc_set_hw_resample(dc_hw_resample_fn fn) { s_hw_resample = fn; }
+
 void dc_sample(const gbcam_frame_t *f, uint8_t *rgb, int w, int h)
 {
     int x0, y0, cw, ch;
     crop_to_aspect(f->width, f->height, w, h, &x0, &y0, &cw, &ch);
+    if (s_hw_resample && s_hw_resample(f, x0, y0, cw, ch, rgb, w, h)) return;
     const int stride = frame_stride(f);
     for (int y = 0; y < h; y++) {
         /* PIL NEAREST: source pixel at floor((i + 0.5) * src / dst). */
@@ -155,6 +198,7 @@ void dc_sample_smooth(const gbcam_frame_t *f, uint8_t *rgb, int w, int h)
 {
     int x0, y0, cw, ch;
     crop_to_aspect(f->width, f->height, w, h, &x0, &y0, &cw, &ch);
+    if (s_hw_resample && s_hw_resample(f, x0, y0, cw, ch, rgb, w, h)) return;
     const int stride = frame_stride(f);
     for (int y = 0; y < h; y++) {
         int ya = y0 + y * ch / h, yb = y0 + (y + 1) * ch / h;
@@ -183,6 +227,55 @@ void dc_sample_smooth(const gbcam_frame_t *f, uint8_t *rgb, int w, int h)
     }
 }
 
+/* See dc_temporal_denoise()'s comment in dithercam.h. Single persistent
+ * accumulator (one live Dither Cam preview at a time), Q8 fixed point like
+ * gbcam's own luma_acc.
+ *
+ * Blend weight ramps continuously with the delta's size instead of a hard
+ * snap-if-bigger-than-threshold cutoff: base (1/(1<<strength)) at delta = 0,
+ * rising to a full 1:1 (this frame's value, no smoothing at all) at
+ * DC_DENOISE_MOTION_LEVELS. A hard cutoff instead means any real change that
+ * lands just under the threshold - exactly what a moving edge's blurred
+ * boundary produces, a spread of delta magnitudes frame to frame - gets the
+ * *full* noise-strength smoothing as if it were noise, which is what a ghost
+ * trail behind fast movement actually is: several frames of "this pixel
+ * hasn't caught up yet". The ramp means a bigger real change always gets
+ * less smoothing, closing in on instant well before the old hard edge,
+ * without giving up noise suppression right at delta = 0 where noise lives. */
+#define DC_DENOISE_MOTION_LEVELS 24 /* same threshold gbcam's temporal_denoise() uses */
+static uint16_t *s_dc_acc;
+static int s_dc_acc_w, s_dc_acc_h;
+
+void dc_temporal_denoise(uint8_t *rgb, int w, int h, int strength)
+{
+    if (strength < 1) strength = 1;
+    if (strength > 3) strength = 3;
+
+    if (w != s_dc_acc_w || h != s_dc_acc_h) {
+        free(s_dc_acc);
+        s_dc_acc = malloc((size_t)w * h * 3 * sizeof(uint16_t));
+        s_dc_acc_w = w;
+        s_dc_acc_h = h;
+        if (s_dc_acc)
+            for (int i = 0; i < w * h * 3; i++) s_dc_acc[i] = (uint16_t)(rgb[i] << 8);
+        return; /* no history yet at this size - pass this frame through as-is */
+    }
+    if (!s_dc_acc) return; /* allocation failed earlier - degrade to no denoise, not a crash */
+
+    const int thresh = DC_DENOISE_MOTION_LEVELS << 8;   /* Q8 */
+    const int base = 256 >> strength;                    /* Q8 blend weight at delta = 0 */
+    for (int i = 0; i < w * h * 3; i++) {
+        int target = rgb[i] << 8;
+        int acc = s_dc_acc[i];
+        int d = target - acc;
+        int ad = d < 0 ? -d : d;
+        int weight = ad >= thresh ? 256 : base + (256 - base) * ad / thresh;
+        acc += d * weight / 256;
+        s_dc_acc[i] = (uint16_t)acc;
+        rgb[i] = (uint8_t)((acc + 128) >> 8);
+    }
+}
+
 /* -------------------------------------------------------------------- levels */
 
 static float level(int v, float contrast, float gamma)
@@ -208,19 +301,84 @@ void dc_levels(uint8_t *rgb, int w, int h, float contrast, float gamma)
 
 #include "dc_lut_data.h"
 
+/* Same weighted distance and bucket-centre convention as tools/gen_dc_lut.py's
+ * nearest_index()/bucket_center() - see that script's docstring. Fills a
+ * caller-owned DC_LUT_SIZE buffer - a few milliseconds, only paid when an
+ * extra palette's LUT isn't (yet, or any more) saved on the SD card - see
+ * ensure_active_lut(). */
+static void build_lut_into(uint8_t *lut, const uint8_t (*colors)[3], int count)
+{
+    const int span = 256 / (1 << DC_LUT_BITS);
+    int idx = 0;
+    for (int ri = 0; ri < (1 << DC_LUT_BITS); ri++) {
+        int r = ri * span + span / 2;
+        for (int gi = 0; gi < (1 << DC_LUT_BITS); gi++) {
+            int g = gi * span + span / 2;
+            for (int bi = 0; bi < (1 << DC_LUT_BITS); bi++, idx++) {
+                int b = bi * span + span / 2;
+                int best = 0, best_d = -1;
+                for (int i = 0; i < count; i++) {
+                    int dr = r - colors[i][0], dg = g - colors[i][1], db = b - colors[i][2];
+                    int d = 2 * dr * dr + 4 * dg * dg + 3 * db * db;
+                    if (best_d < 0 || d < best_d) { best = i; best_d = d; if (d == 0) break; }
+                }
+                lut[idx] = (uint8_t)best;
+            }
+        }
+    }
+}
+
+/* Switches the single active extra-palette LUT slot to index e (a no-op if
+ * it's already there). Tries the host's saved copy first (a file read, if
+ * dc_set_extra_lut_io() registered one - typically far cheaper than
+ * rebuilding); on a miss, builds it from scratch and hands it to the host to
+ * save for next time. Either way, at most one extra palette's DC_LUT_SIZE
+ * buffer is ever resident - switching to a different one frees this one
+ * first, there's no per-palette accumulation over a session. */
+static void ensure_active_lut(int e)
+{
+    if (e == s_active_extra_idx) return;
+    free(s_active_lut);
+    s_active_lut = NULL;
+    s_active_extra_idx = e;
+
+    uint8_t *buf = malloc(DC_LUT_SIZE);
+    if (!buf) return;
+    if (s_lut_load && s_lut_load(e, buf)) {
+        s_active_lut = buf;
+        return;
+    }
+
+    const uint8_t (*colors)[3];
+    int count = s_extra_colors ? s_extra_colors(e, &colors) : 0;
+    if (count <= 0) {
+        free(buf);
+        return;
+    }
+    build_lut_into(buf, colors, count);
+    s_active_lut = buf;
+    if (s_lut_save) s_lut_save(e, buf);
+}
+
 /* O(1) nearest-palette-colour lookup: dc_palette_lut[] is precomputed offline
  * (tools/gen_dc_lut.py) with the same weighted distance a linear scan would
  * use (2*dr^2 + 4*dg^2 + 3*db^2), at DC_LUT_BITS bits/channel. Replaces a
  * per-pixel O(n) scan over up to 64 palette colours - at 320x240 with a
  * 64-colour palette that scan alone missed the 15fps budget on the ESP32-P4
- * (see PLAN.md); this doesn't, regardless of palette size. */
+ * (see PLAN.md); this doesn't, regardless of palette size. Extra (SD-loaded)
+ * palettes get the same treatment - see ensure_active_lut(). */
 static inline int nearest(float r, float g, float b, int palette)
 {
     int ri = (int)(r < 0 ? 0 : r > 255 ? 255 : r) >> (8 - DC_LUT_BITS);
     int gi = (int)(g < 0 ? 0 : g > 255 ? 255 : g) >> (8 - DC_LUT_BITS);
     int bi = (int)(b < 0 ? 0 : b > 255 ? 255 : b) >> (8 - DC_LUT_BITS);
     int idx = (ri << (DC_LUT_BITS * 2)) | (gi << DC_LUT_BITS) | bi;
-    return dc_palette_lut[palette][idx];
+    if (palette < DC_PALETTE_COUNT) return dc_palette_lut[palette][idx];
+
+    int e = palette - DC_PALETTE_COUNT;
+    if (e < 0 || e >= s_extra_count) return 0;
+    ensure_active_lut(e);
+    return s_active_lut ? s_active_lut[idx] : 0;
 }
 
 static inline void emit(int i, int idx, const uint8_t (*pal)[3], uint8_t *out_rgb, uint8_t *out_index)

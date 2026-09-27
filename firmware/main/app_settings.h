@@ -18,7 +18,6 @@ typedef struct {
     uint8_t palette;   /* gbcam_palette_t */
     uint8_t dither;    /* gbcam_dither_t */
     uint8_t style;     /* gbcam_style_t */
-    uint8_t denoise;   /* 0..3 */
     uint8_t cam_mode;  /* cam_mode_t */
     uint8_t dc_palette;
     uint8_t dc_method; /* dc_method_t */
@@ -27,7 +26,11 @@ typedef struct {
     uint8_t vf_scale;    /* GB Camera viewfinder: 0 = 2x cropped (224x224, default), 1 = 1:1 (128x112) */
     uint8_t normal_size; /* Normal Cam resolution, see normal_size() in dithercam.h */
     uint8_t frame;       /* GB Camera border: 0 = none, 1..FRAME_COUNT = frame_id_t + 1, see frames.h */
+    uint8_t adjust[CAM_MODE_COUNT]; /* per-mode quick-adjust dial target (adjust_t in app.c), Mode-button-click cycles it */
+    uint8_t sleep_min; /* index into app.c's SLEEP_MINUTES[], SLEEP_OPTIONS_COUNT entries; value 0 = never auto-sleep */
 } app_settings_t;
+
+#define SLEEP_OPTIONS_COUNT 6
 
 /* Shared by the board and simulator back ends (app_settings_common.c). */
 void settings_defaults(app_settings_t *s);
