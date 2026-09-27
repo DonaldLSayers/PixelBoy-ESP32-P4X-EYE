@@ -33,6 +33,9 @@ ICONS = [
     ("ICON_GALLERY", "gallery"),
     ("ICON_EXIT", "exit"),
     ("ICON_FRAME", "frame"),
+    ("ICON_SLEEP", "sleep"),
+    ("ICON_AUTO", "auto"),
+    ("ICON_EDGE", "edge"),
 ]
 
 

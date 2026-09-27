@@ -56,7 +56,16 @@ int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg);
  * display_begin_camera() the same as the live Dither/Normal Cam view).
  * *out_rgb must be freed with storage_free_dc(). */
 esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h);
-/* Also frees a storage_load_gb_png() result - same stbi_image_free() either way. */
+
+/* Small pre-shrunk copy for the gallery grid (see app_storage.c's
+ * THUMB_MAX_DIM) - much cheaper to decode than the full photo every time a
+ * thumbnail's redrawn. Generated at save time going forward; a photo saved
+ * before this existed gets one generated (and cached to disk) the first
+ * time it's viewed. Frees the same way as storage_load_dc(). */
+esp_err_t storage_load_thumb(int number, bool is_dc, uint8_t **out_rgb, int *out_w, int *out_h);
+
+/* Also frees a storage_load_gb_png()/storage_load_thumb() result - same
+ * stbi_image_free() either way. */
 void storage_free_dc(uint8_t *rgb);
 
 esp_err_t storage_delete(int number, bool is_dc);

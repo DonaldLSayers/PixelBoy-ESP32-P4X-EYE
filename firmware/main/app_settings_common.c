@@ -21,6 +21,9 @@ void settings_defaults(app_settings_t *s)
     s->frame = 0;
     for (int i = 0; i < CAM_MODE_COUNT; i++) s->adjust[i] = 0;
     s->sleep_min = 3; /* index into SLEEP_MINUTES[] (app.c) - {0,1,2,3,5,10}[3] = 3 minutes */
+    s->gb_auto = 1; /* matches gbcam_default_settings()'s own auto_levels=true - no behaviour change by default */
+    s->dc_auto = 0; /* new, opt-in - PixelBoy never had auto-exposure before this */
+    s->dc_edge = 0; /* new, opt-in */
 }
 
 bool settings_valid(const app_settings_t *s)
@@ -36,7 +39,8 @@ bool settings_valid(const app_settings_t *s)
           s->dc_palette < DC_PALETTE_COUNT + MAX_SD_PALETTES && s->dc_method < DC_METHOD_COUNT &&
           s->dc_size < DC_SIZE_COUNT && s->dc_amount >= 0.0f && s->dc_amount <= 1.0f &&
           s->vf_scale <= 1 && s->normal_size < NORMAL_SIZE_COUNT &&
-          s->frame <= FRAME_COUNT + MAX_SD_FRAMES && s->sleep_min < SLEEP_OPTIONS_COUNT))
+          s->frame <= FRAME_COUNT + MAX_SD_FRAMES && s->sleep_min < SLEEP_OPTIONS_COUNT &&
+          s->gb_auto <= 1 && s->dc_auto <= 1 && s->dc_edge <= 1))
         return false;
     /* Upper bound only - GB has 4 quick-adjust targets, Dither has 6, Normal
      * has 3; the exact per-mode count is clamped again where it's read

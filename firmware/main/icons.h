@@ -13,5 +13,8 @@ typedef enum {
     ICON_GALLERY,
     ICON_EXIT,
     ICON_FRAME,
+    ICON_SLEEP,
+    ICON_AUTO,
+    ICON_EDGE,
     ICON_COUNT
 } icon_id_t;

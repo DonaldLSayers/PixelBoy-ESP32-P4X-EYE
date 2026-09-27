@@ -12,7 +12,8 @@ static const char *TAG = "settings";
 #define NVS_NAMESPACE "gbcam"
 #define NVS_KEY "settings"
 #define SETTLE_US (2 * 1000 * 1000)
-#define SETTINGS_VERSION 9  /* bumped: added per-mode adjust[] */
+#define SETTINGS_VERSION 9  /* only bump on incompatible field reorder/removal - see settings_load()'s
+                              * size-tolerant load for plain field additions, which need no bump */
 
 typedef struct {
     uint8_t version;
@@ -37,11 +38,25 @@ void settings_load(app_settings_t *s)
 
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    /* stored_t may be smaller than current (fields appended since it was
+     * saved) - keep s's already-defaulted tail fields in that case, only
+     * overwriting the prefix that was actually stored, instead of rejecting
+     * the whole blob and losing every setting to a struct size bump. */
     stored_t st;
+    memset(&st, 0, sizeof st);
     size_t len = sizeof st;
-    if (nvs_get_blob(h, NVS_KEY, &st, &len) == ESP_OK && len == sizeof st &&
-        st.version == SETTINGS_VERSION && settings_valid(&st.s))
-        *s = st.s;
+    esp_err_t rd = nvs_get_blob(h, NVS_KEY, &st, &len);
+    if (rd == ESP_ERR_NVS_INVALID_LENGTH && len > 0 && len <= sizeof st) {
+        /* stored blob is smaller than sizeof(stored_t) - len now holds its
+         * real size (NVS convention); re-read into a correctly-sized area. */
+        rd = nvs_get_blob(h, NVS_KEY, &st, &len);
+    }
+    if (rd == ESP_OK && len >= sizeof(uint8_t) && len <= sizeof st &&
+        st.version == SETTINGS_VERSION) {
+        app_settings_t merged = *s;
+        memcpy(&merged, &st.s, len - sizeof(uint8_t));
+        if (settings_valid(&merged)) *s = merged;
+    }
     nvs_close(h);
 }
 
