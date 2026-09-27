@@ -364,8 +364,8 @@ static void ensure_active_lut(int e)
  * (tools/gen_dc_lut.py) with the same weighted distance a linear scan would
  * use (2*dr^2 + 4*dg^2 + 3*db^2), at DC_LUT_BITS bits/channel. Replaces a
  * per-pixel O(n) scan over up to 64 palette colours - at 320x240 with a
- * 64-colour palette that scan alone missed the 15fps budget on the ESP32-P4
- * (see PLAN.md); this doesn't, regardless of palette size. Extra (SD-loaded)
+ * 64-colour palette that scan alone missed the 15fps budget on the ESP32-P4;
+ * this doesn't, regardless of palette size. Extra (SD-loaded)
  * palettes get the same treatment - see ensure_active_lut(). */
 static inline int nearest(float r, float g, float b, int palette)
 {

@@ -1,4 +1,4 @@
-# GB Camera (ESP32-P4X-EYE)
+# PixelBoy (ESP32-P4X-EYE)
 
 A pocket camera on an Espressif ESP32-P4X-EYE with three modes (Bottom button cycles):
 - **GB CAMERA** — 128×112, 4 shades, the original Game Boy Camera's dithering/contrast/auto-exposure
@@ -82,9 +82,9 @@ python tools\host\gbcam_live.py                            # live webcam preview
 ```
 
 `gbcam_cli.exe` options: `-b` brightness 0–16, `-c` contrast 0–15, `-d` dither, `-p`
-palette, `-s` scale. GB Camera has two styles: PIXEL CAM (default, auto contrast/gamma,
-no edge enhancement) and HARDWARE (models the real M64282FP sensor, harsher, with edge
-outlines).
+palette, `-s` scale. GB Camera has two styles: HARDWARE (default, models the real
+M64282FP sensor, with edge outlines) and PIXEL CAM (auto contrast/gamma, no edge
+enhancement, cleaner).
 
 ## Layout
 
