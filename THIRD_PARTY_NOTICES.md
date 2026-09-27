@@ -4,8 +4,7 @@
 |---|---|---|---|
 | gb-photo (Toxa): contrast tables, dither patterns, auto-exposure logic | `components/gbcam/src/gbcam_dither.c`, `gbcam.c` | MIT, Copyright (c) 2022 Toxa. Full text in `gbcam_dither.c` | https://github.com/untoxa/gb-photo |
 | stb_image, stb_image_write (Sean Barrett) | `components/stb/include` | Public domain / MIT (dual, see headers) | https://github.com/nothings/stb |
-| "Early GameBoy" font (LDEJRuff, via FontStruct) | `early-gameboy.ttf`, converted to `firmware/main/font8x8.h` by `tools/gen_font.py` | CC BY-SA 3.0, Copyright LDEJRuff 2012 - **share-alike**: derivatives (including this font8x8.h conversion) must stay under the same license. See http://creativecommons.org/licenses/by-sa/3.0/ | not on GitHub - FontStruct (fontstruct.com) |
-| 5×7 font (fallback glyphs only: `#$%&+/=@\^_`, missing from the font above) | `firmware/main/font5x7.h` | Classic public-domain 5×7 glyph set | - (no specific source project) |
+| "Early GameBoy" font (LDEJRuff, via FontStruct) | `assets/fonts/early-gameboy.ttf`, converted to `firmware/main/font8x8.h` by `tools/gen_font.py` | CC BY-SA 3.0, Copyright LDEJRuff 2012 - **share-alike**: derivatives (including this font8x8.h conversion) must stay under the same license. See http://creativecommons.org/licenses/by-sa/3.0/ | not on GitHub - FontStruct (fontstruct.com) |
 
 ## Colour palettes
 

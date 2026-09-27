@@ -9,11 +9,11 @@ tools/host/*.pdb
 tools/host/*.dll
 tools/host/*.lib
 tools/**/__pycache__/
-samples/
 tools/**/*.new.dll
 tools/**/*.old-*.dll
 tools/**/*.new.lib
 tools/**/*.new.pdb
+samples/
 
 # PIXEL CAM is its own separate git repo (github.com/DonaldLSayers/PixelBoy) -
 # not part of this one.

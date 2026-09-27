@@ -8,8 +8,6 @@ A pocket camera on an Espressif ESP32-P4X-EYE with three modes (Bottom button cy
   a clean 1x or 2x factor, so the preview is always pixel-identical to the saved photo
 - **DIGICAM** — plain colour preview with brightness/contrast
 
-Plan and status: [PLAN.md](PLAN.md).
-
 ## Controls
 
 | Input | Viewfinder | Menu | Gallery |
