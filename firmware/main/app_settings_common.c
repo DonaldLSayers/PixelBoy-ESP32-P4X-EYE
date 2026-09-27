@@ -10,7 +10,7 @@ void settings_defaults(app_settings_t *s)
     s->contrast = GBCAM_DEFAULT_CONTRAST;
     s->palette = GBCAM_PALETTE_DEFAULT;
     s->dither = GBCAM_DITHER_DEFAULT;
-    s->style = GBCAM_STYLE_PIXELCAM;
+    s->style = GBCAM_STYLE_HARDWARE;
     s->cam_mode = CAM_MODE_GB;
     s->dc_palette = DC_PALETTE_DEFAULT;
     s->dc_method = DC_METHOD_DEFAULT;

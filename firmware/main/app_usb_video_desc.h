@@ -1,8 +1,8 @@
 #pragma once
 
-/* ESP-only: builds the composite MSC+UVC descriptor set app_usb.c installs
- * (see app_usb_video_desc.c). Not in app_usb.h - that header is also
- * compiled by the simulator, which has no tinyusb of its own. */
+/* Builds the composite MSC+UVC descriptor set app_usb.c installs (see
+ * app_usb_video_desc.c). Not in app_usb.h - that header is included by
+ * app.c, which has no reason to see tinyusb's own types. */
 #include "tinyusb.h"
 
 void usb_video_desc_init(void);                          /* call once at boot, before usb_msc_init() */

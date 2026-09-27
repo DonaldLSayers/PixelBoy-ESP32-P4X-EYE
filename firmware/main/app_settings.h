@@ -35,7 +35,7 @@ typedef struct {
 
 #define SLEEP_OPTIONS_COUNT 6
 
-/* Shared by the board and simulator back ends (app_settings_common.c). */
+/* app_settings_common.c - no board-specific logic, just defaults/validation. */
 void settings_defaults(app_settings_t *s);
 bool settings_valid(const app_settings_t *s);
 

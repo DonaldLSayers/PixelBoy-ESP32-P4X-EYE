@@ -1,4 +1,4 @@
-/* Display back end: the LCD on the board, or a window in the PC simulator. */
+/* Display back end: the LCD on the board. */
 #pragma once
 
 #include <stdint.h>

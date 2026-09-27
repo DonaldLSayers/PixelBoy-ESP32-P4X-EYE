@@ -19,20 +19,17 @@ Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xi
 |---|---|---|---|
 | `2bit_demichrome` | 2bit Demichrome | Space Sandwich | https://lospec.com/palette-list/2bit-demichrome |
 | `autumn_chill` | Autumn Chill | Doph | https://lospec.com/palette-list/autumn-chill |
-| `bw` | - | **Not from Lospec** - a plain black/white pair (each duplicated to fill 4 slots); looks hand-made for this project. Confirm and credit yourself if so. | - |
 | `coldfire_gb` | Coldfire GB | Kerrie Lake | https://lospec.com/palette-list/coldfire-gb |
 | `crimson` | Crimson | WildLeoKnight | https://lospec.com/palette-list/crimson |
 | `gb_green` | Nintendo Gameboy (bgb) | bgb emulator's default palette (Lospec credits no individual submitter) | https://lospec.com/palette-list/nintendo-gameboy-bgb |
-| `grayscale` | - | **Not from Lospec** - an even mathematical 4-step ramp (0/85/170/255), not a specific named palette. Likely generated for this project as the default. | - |
 | `hollow` | Hollow | Poltergasm | https://lospec.com/palette-list/hollow |
 | `ice_cream_gb` | Ice Cream GB | Kerrie Lake | https://lospec.com/palette-list/ice-cream-gb |
 | `kirokaze_gb` | Kirokaze Gameboy | Kirokaze | https://lospec.com/palette-list/kirokaze-gameboy |
-| `links_awakening_sgb` | Link's Awakening (SGB) | Drawn from the Super Game Boy palette used by *The Legend of Zelda: Link's Awakening DX*; Lospec credits no individual submitter | https://lospec.com/palette-list/links-awakening-sgb |
+| `links_awakening_sgb` | Link's Awakening (SGB) | Drawn from the Super Game Boy palette used by *The Legend of Zelda: Link's Awakening DX* | https://lospec.com/palette-list/links-awakening-sgb |
 | `mist_gb` | Mist GB | Kerrie Lake | https://lospec.com/palette-list/mist-gb |
 | `moonlight_gb` | Moonlight GB | Tofu | https://lospec.com/palette-list/moonlight-gb |
 | `nostalgia` | Nostalgia | WildLeoKnight | https://lospec.com/palette-list/nostalgia |
 | `rustic_gb` | Rustic GB | Kerrie Lake | https://lospec.com/palette-list/rustic-gb |
-| `sepia` | - | **Not from Lospec** - no matching palette found (searched by exact colour). Likely hand-made for this project. Confirm and credit yourself if so. | - |
 | `spacehaze` | SpaceHaze | WildLeoKnight | https://lospec.com/palette-list/spacehaze |
 | `wish_gb` | Wish GB | Kerrie Lake | https://lospec.com/palette-list/wish-gb |
 
@@ -42,21 +39,17 @@ Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xi
 
 | File | Palette | Credit | Source |
 |---|---|---|---|
-| `8ancient` | - | **Not from Lospec** - no matching palette found. Likely hand-made for this project. Confirm and credit yourself if so. | - |
-| `8autumn` | - | **Not from Lospec** - no matching palette found. Likely hand-made for this project. Confirm and credit yourself if so. | - |
 | `apollo` | Apollo | AdamCYounis | https://lospec.com/palette-list/apollo |
 | `berry_nebula` | Berry Nebula | LostInIndigo | https://lospec.com/palette-list/berry-nebula |
 | `blessing` | Blessing | Maruki | https://lospec.com/palette-list/blessing |
-| `c64` | Commodore 64 | The Commodore 64 computer's hardware palette; Lospec credits no individual submitter | https://lospec.com/palette-list/commodore64 |
+| `c64` | Commodore 64 | The Commodore 64 computer's hardware palette | https://lospec.com/palette-list/commodore64 |
 | `cmyk` | CMYK | Soeryo Nugroho ("Brotho") | https://lospec.com/palette-list/cmyk |
 | `curiosities` | Curiosities | sukinapan | https://lospec.com/palette-list/curiosities |
 | `db32` | DawnBringer 32 | DawnBringer | https://lospec.com/palette-list/dawnbringer-32 |
 | `endesga_32` | Endesga 32 | ENDESGA | https://lospec.com/palette-list/endesga-32 |
 | `gb` | Nintendo Internal | Submitted by Daniel Smith, based on a palette Nintendo used internally for Game Boy screenshots, shared publicly by Kate Willaert | https://lospec.com/palette-list/nintendo-internal |
 | `golden_days` | Golden Days | Chicknhawk | https://lospec.com/palette-list/golden-days |
-| `harvest_dusk` | - | **Not from Lospec** - no matching palette found. Likely hand-made for this project. Confirm and credit yourself if so. | - |
 | `hope_diamond` | Hope Diamond | patchouli | https://lospec.com/palette-list/hope-diamond |
-| `ice_cream` | - | **Not from Lospec** - no exact-name/colour match found (Lospec has other, differently-coloured "ice cream"-themed palettes, e.g. Ice Cream 16, Ice Cream Shoppe). Likely hand-made for this project. Confirm and credit yourself if so. | - |
 | `journey` | Journey | PineappleOnPizza | https://lospec.com/palette-list/journey |
 | `lost_century` | Lost Century | SurrealEmber | https://lospec.com/palette-list/lost-century |
 | `memory_block_36` | memory block 36 | Vsigos | https://lospec.com/palette-list/memory-block-36 |
@@ -67,8 +60,8 @@ Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xi
 | `pastel_qt` | pastel qt | polyphrog | https://lospec.com/palette-list/pastel-qt |
 | `pico8` | PICO-8 | Lexaloffle Games (built into the PICO-8 fantasy console) | https://lospec.com/palette-list/pico-8 |
 | `pixelwave` | pixelwave | DogesArePros | https://lospec.com/palette-list/pixelwave |
-| `purple_slime` | - | **Not from Lospec** - no matching palette found. Likely hand-made for this project. Confirm and credit yourself if so. | - |
+| `purple_slime` | Purple Slime | TechDweeb (YouTube) | https://www.youtube.com/techdweeb |
 | `resurrect_64` | Resurrect 64 | Kerrie Lake | https://lospec.com/palette-list/resurrect-64 |
-| `root_beer` | - | **Not from Lospec** - no matching palette found (closest relative found, "horehound-4," is differently coloured and not a real match). Likely hand-made for this project. Confirm and credit yourself if so. | - |
+| `root_beer` | Root Beer | TechDweeb (YouTube) | https://www.youtube.com/techdweeb |
 | `sweetie16` | Sweetie 16 | GrafxKid | https://lospec.com/palette-list/sweetie-16 |
 | `vinik24` | Vinik24 | Vinik | https://lospec.com/palette-list/vinik24 |

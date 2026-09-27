@@ -8,11 +8,7 @@ tools/host/*.exe
 tools/host/*.pdb
 tools/host/*.dll
 tools/host/*.lib
-tools/sim/*.dll
-tools/sim/*.lib
-tools/sim/*.pdb
 tools/**/__pycache__/
-sim_data/
 samples/
 tools/**/*.new.dll
 tools/**/*.old-*.dll
