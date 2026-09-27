@@ -56,8 +56,15 @@ Shutter cancels. Both webcam modes show up as a UVC webcam named "PIXELBOY".
 
 ## Flash
 
-No build needed: [flash from the browser](https://donaldlsayers.github.io/PixelBoy-ESP32-P4X-EYE/)
-(Chrome/Edge, USB cable into the "Debug" port).
+No build needed. Try the [browser flasher](https://donaldlsayers.github.io/PixelBoy-ESP32-P4X-EYE/)
+(Chrome/Edge, USB cable into the "Debug" port) first - if it fails to connect (a known
+rough edge in ESP32-P4 USB-Serial-JTAG support), download `docs/` and run:
+
+```powershell
+pip install esptool
+cd docs
+.\flash.ps1 -Port COM5   # check the COM number in Device Manager
+```
 
 ## Build and flash
 
