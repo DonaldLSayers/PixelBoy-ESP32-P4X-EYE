@@ -94,6 +94,10 @@ static float *s_dc_quant_work;                     /* dc_quantize()'s scratch bu
                                                      * preallocated so the live viewfinder (PixelBoy) doesn't
                                                      * malloc/free it every single frame (dc_quantize() mallocs
                                                      * its own when passed NULL here, up to ~690KB at 15fps). */
+static uint8_t *s_webcam_rgb;                       /* USB webcam output canvas, WEBCAM_FRAME_W*WEBCAM_FRAME_H*3 - see usb_webcam_feed_screen()/usb_webcam_feed_gb() */
+static uint8_t *s_screen_rgb;                        /* RGB565->RGB888 scratch for mirror mode, DISP_W*DISP_H*3 - see usb_webcam_feed_screen() */
+static uint8_t *s_frame_compose_scratch;             /* frame_compose_rgb()'s output before centring into s_webcam_rgb - see usb_webcam_feed_gb() */
+static bool s_webcam_mirror;                         /* which usb_webcam_feed_*() app_step() calls - see handle_viewfinder_input()'s USB prompt */
 static int64_t s_freeze_until_us;                  /* shutter animation window - see take_photo()/viewfinder_frame() */
 static int64_t s_frame_preview_until_us;            /* see ROW_FRAME in activate_menu_row() */
 static int64_t s_last_input_us;                    /* see ROW_SLEEP/app_step() */
@@ -149,7 +153,7 @@ static void osd_brief(const char *l1)
 
 static void draw_osd(void)
 {
-    if (usb_msc_prompt_pending()) { display_osd("USB CONNECTED", "MENU=YES  SHUTTER=NO"); return; }
+    if (usb_msc_prompt_pending()) { display_osd("USB: MENU=DRIVE", "BTM=MIRROR MODE=GB"); return; }
     if (now_us() > s_osd.until_us) return;
     display_osd(s_osd.line1, s_osd.line2);
 }
@@ -919,6 +923,19 @@ static void handle_viewfinder_input(const input_event_t *ev)
             } else {
                 osd_text("USB FAILED", NULL); /* see app_usb.c's log for why */
             }
+        } else if (ev->type == INPUT_CLICK && ev->button == BTN_CAMMODE) {
+            /* Mirror mode: no dedicated screen, no camera_pause() - it just
+             * starts feeding whatever's already on screen (any camera mode,
+             * the menu, the gallery...) to USB alongside normal use. See
+             * usb_webcam_feed_screen() and app_usb.h's comment. */
+            s_webcam_mirror = true;
+            usb_webcam_accept();
+            osd_brief("MIRROR ON");
+        } else if (ev->type == INPUT_CLICK && ev->button == BTN_MODE) {
+            /* GB Webcam: just the photo (+ frame, if on), see usb_webcam_feed_gb(). */
+            s_webcam_mirror = false;
+            usb_webcam_accept();
+            osd_brief("GB WEBCAM ON");
         } else if (ev->type == INPUT_CLICK && ev->button == BTN_SHUTTER) {
             usb_msc_decline();
         }
@@ -1315,6 +1332,9 @@ esp_err_t app_init(void)
     s_dc_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
     s_still_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
     s_dc_quant_work = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3 * sizeof(float));
+    s_webcam_rgb = calloc(1, (size_t)WEBCAM_FRAME_W * WEBCAM_FRAME_H * 3);
+    s_screen_rgb = calloc(1, (size_t)DISP_W * DISP_H * 3);
+    s_frame_compose_scratch = calloc(1, (size_t)WEBCAM_FRAME_W * WEBCAM_FRAME_H * 3);
     /* These three used to be plain static arrays (~165KB combined) - fine on
      * a desktop, but on this board that's ~165KB permanently reserved out of
      * a small internal RAM budget, whether or not a frame's actually being
@@ -1324,7 +1344,8 @@ esp_err_t app_init(void)
     s_still = calloc(1, GBCAM_PIXELS);
     s_frame_rgb = calloc(1, 160 * 224 * 3);
     s_gallery_plain_rgb = calloc(1, GBCAM_W * GBCAM_H * 3);
-    if (!s_cam || !s_dc_rgb || !s_still_rgb || !s_still || !s_frame_rgb || !s_gallery_plain_rgb || !s_dc_quant_work) {
+    if (!s_cam || !s_dc_rgb || !s_still_rgb || !s_still || !s_frame_rgb || !s_gallery_plain_rgb || !s_dc_quant_work ||
+        !s_webcam_rgb || !s_screen_rgb || !s_frame_compose_scratch) {
         PLOGE(TAG, "no memory");
         return ESP_ERR_NO_MEM;
     }
@@ -1394,6 +1415,76 @@ esp_err_t app_init(void)
     return ESP_OK;
 }
 
+/* Blit an RGB888 src_w x src_h image into s_webcam_rgb (WEBCAM_FRAME_W x
+ * WEBCAM_FRAME_H), centred on black - shared by both feed functions below,
+ * since neither the 240x240 screen nor an arbitrary frame's canvas is
+ * guaranteed to exactly fill the fixed webcam output size. Clears the whole
+ * canvas first (not just the padding), same cost either way at this size. */
+static void webcam_blit_centered(const uint8_t *src, int src_w, int src_h)
+{
+    memset(s_webcam_rgb, 0, (size_t)WEBCAM_FRAME_W * WEBCAM_FRAME_H * 3);
+    int ox = (WEBCAM_FRAME_W - src_w) / 2, oy = (WEBCAM_FRAME_H - src_h) / 2;
+    for (int y = 0; y < src_h; y++)
+        memcpy(s_webcam_rgb + (size_t)((oy + y) * WEBCAM_FRAME_W + ox) * 3, src + (size_t)y * src_w * 3, (size_t)src_w * 3);
+}
+
+/* Mirror mode: convert whatever display_end_frame() just sent to the LCD
+ * (RGB565) into RGB888 and hand it to the USB video interface. Cheap no-op
+ * via usb_webcam_feed() itself when webcam mode's off or the host isn't
+ * actively pulling frames, but skip the conversion work entirely in that
+ * case too - it's real per-pixel work at 240x240, no point doing it unread. */
+static void usb_webcam_feed_screen(void)
+{
+    if (!usb_webcam_active() || !s_webcam_mirror) return;
+    const uint16_t *fb = display_last_frame();
+    for (int i = 0; i < DISP_W * DISP_H; i++) {
+        /* fb[] is byte-swapped for the panel (BSP_LCD_BIGENDIAN) - see
+         * app_display.c's rgb565(); undo that first. */
+        uint16_t p = (uint16_t)((fb[i] >> 8) | (fb[i] << 8));
+        uint8_t *o = s_screen_rgb + (size_t)i * 3;
+        o[0] = (uint8_t)((p >> 11) * 255 / 31);        /* 5-bit R */
+        o[1] = (uint8_t)(((p >> 5) & 0x3F) * 255 / 63); /* 6-bit G */
+        o[2] = (uint8_t)((p & 0x1F) * 255 / 31);        /* 5-bit B */
+    }
+    webcam_blit_centered(s_screen_rgb, DISP_W, DISP_H);
+    usb_webcam_feed(s_webcam_rgb);
+}
+
+/* GB Webcam: just the GB Camera photo (gbcam_t.shades, palette-mapped) at
+ * 3x - an exact fit for WEBCAM_FRAME_W/H, no padding needed - with its
+ * frame composited in if one's on (frame_compose_rgb(), scaled down to fit
+ * the fixed canvas if it would've been bigger at 3x, then centred same as
+ * the plain-photo case). shades[] is only refreshed while GB Camera is the
+ * selected camera mode (see grab_process_draw()) - this just freezes on the
+ * last GB Camera frame otherwise, same as a stale gallery/menu screen
+ * behind Mirror mode would. */
+static void usb_webcam_feed_gb(void)
+{
+    if (!usb_webcam_active() || s_webcam_mirror) return;
+    if (s_set.frame == 0) {
+        for (int y = 0; y < GBCAM_H; y++) {
+            for (int x = 0; x < GBCAM_W; x++) {
+                const uint8_t *c = gbcam_palette_rgb((gbcam_palette_t)s_set.palette, s_cam->shades[y * GBCAM_W + x]);
+                for (int dy = 0; dy < 3; dy++) {
+                    uint8_t *o = s_webcam_rgb + (size_t)((y * 3 + dy) * WEBCAM_FRAME_W + x * 3) * 3;
+                    for (int dx = 0; dx < 3; dx++) { o[dx * 3] = c[0]; o[dx * 3 + 1] = c[1]; o[dx * 3 + 2] = c[2]; }
+                }
+            }
+        }
+    } else {
+        const frame_meta_t *fm = frames_get(s_set.frame - 1);
+        int fw, fh;
+        frame_size(fm, 1, &fw, &fh);
+        int scale = 3;
+        while (scale > 1 && (fw * scale > WEBCAM_FRAME_W || fh * scale > WEBCAM_FRAME_H)) scale--;
+        int ow, oh;
+        frame_size(fm, scale, &ow, &oh);
+        frame_compose_rgb(fm, s_cam->shades, (gbcam_palette_t)s_set.palette, scale, s_frame_compose_scratch);
+        webcam_blit_centered(s_frame_compose_scratch, ow, oh);
+    }
+    usb_webcam_feed(s_webcam_rgb);
+}
+
 void app_step(void)
 {
     usb_msc_tick();
@@ -1416,15 +1507,18 @@ void app_step(void)
 
     /* Not while the SD card's handed to a PC (s_screen==SCREEN_USB implies
      * usb_msc_active(), given app_step()'s own check above) - cutting power
-     * mid-transfer would be a bad surprise, not just an inconvenience. sleep_min
-     * of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
+     * mid-transfer would be a bad surprise, not just an inconvenience. Same
+     * for mirror mode - sleeping would blank the very screen it's streaming.
+     * sleep_min of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
     int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
-    if (sleep_min != 0 && s_screen != SCREEN_USB &&
+    if (sleep_min != 0 && s_screen != SCREEN_USB && !usb_webcam_active() &&
         now_us() - s_last_input_us > (int64_t)sleep_min * 60 * 1000000LL) enter_sleep();
 
     if (s_screen == SCREEN_GALLERY) gallery_frame();
     else if (s_screen == SCREEN_USB) usb_screen_frame();
     else viewfinder_frame(); /* also drives SCREEN_MENU, so the feed keeps live behind it */
+    usb_webcam_feed_screen(); /* after the draw above, whichever screen it was - see its own comment */
+    usb_webcam_feed_gb();     /* only one of these two actually sends anything - see s_webcam_mirror */
 
     settings_tick();
 }
