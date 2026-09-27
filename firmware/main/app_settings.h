@@ -28,6 +28,9 @@ typedef struct {
     uint8_t frame;       /* GB Camera border: 0 = none, 1..FRAME_COUNT = frame_id_t + 1, see frames.h */
     uint8_t adjust[CAM_MODE_COUNT]; /* per-mode quick-adjust dial target (adjust_t in app.c), Mode-button-click cycles it */
     uint8_t sleep_min; /* index into app.c's SLEEP_MINUTES[], SLEEP_OPTIONS_COUNT entries; value 0 = never auto-sleep */
+    uint8_t gb_auto; /* GB Camera PIXEL CAM style: entropy-search auto brightness/contrast (gbcam's own auto_levels) */
+    uint8_t dc_auto; /* PixelBoy (Dither Cam): simple mean-luma auto-exposure, see dc_auto_compute_gamma() in app.c */
+    uint8_t dc_edge; /* PixelBoy: M64282FP-style edge enhancement (GB Camera's own apply_edge(), generalized to RGB), see edge_enhance_rgb() in app.c */
 } app_settings_t;
 
 #define SLEEP_OPTIONS_COUNT 6

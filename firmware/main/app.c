@@ -28,6 +28,10 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
 #include <string.h>
 
 #include "dithercam.h"
@@ -86,6 +90,10 @@ static int s_dc_live_w, s_dc_live_h;
 
 static uint8_t *s_still;                           /* GB photo capture buffer, staged for storage_save(), GBCAM_PIXELS */
 static uint8_t *s_still_rgb;                       /* Dither/Normal Cam capture buffer, DC_MAX_W*DC_MAX_H*3 */
+static float *s_dc_quant_work;                     /* dc_quantize()'s scratch buffer, DC_MAX_W*DC_MAX_H*3 floats -
+                                                     * preallocated so the live viewfinder (PixelBoy) doesn't
+                                                     * malloc/free it every single frame (dc_quantize() mallocs
+                                                     * its own when passed NULL here, up to ~690KB at 15fps). */
 static int64_t s_freeze_until_us;                  /* shutter animation window - see take_photo()/viewfinder_frame() */
 static int64_t s_frame_preview_until_us;            /* see ROW_FRAME in activate_menu_row() */
 static int64_t s_last_input_us;                    /* see ROW_SLEEP/app_step() */
@@ -97,11 +105,19 @@ static bool s_gallery_framed;       /* single GB photo view: Mode button toggles
 static uint8_t *s_gallery_plain_rgb; /* scratch: a saved GB photo with any frame stripped back out, GBCAM_W*GBCAM_H*3 */
 static int64_t s_delete_armed_until_us;
 
+/* Decoded grid-thumbnail cache - see gallery_grid_frame(). */
+static uint8_t *s_grid_cache_rgb[GALLERY_GRID_CELLS];
+static int s_grid_cache_w[GALLERY_GRID_CELLS], s_grid_cache_h[GALLERY_GRID_CELLS];
+static int s_grid_cache_page = -1;
+
 /* ------------------------------------------------------------------- menu */
 
 typedef enum {
-    ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_FRAME, ROW_DC_PALETTE, ROW_DC_METHOD, ROW_DC_SIZE,
+    ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_FRAME, ROW_GB_AUTO, ROW_DC_PALETTE, ROW_DC_METHOD,
+    ROW_DC_SIZE,
     ROW_DC_AMOUNT,
+    ROW_DC_AUTO,
+    ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
     ROW_SLEEP,
     ROW_GALLERY, ROW_EXIT
@@ -111,7 +127,7 @@ typedef enum {
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[8];
+static menu_row_t s_menu_rows[9];
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -144,6 +160,15 @@ static void apply_settings(void)
     s_cam->settings.contrast = s_set.contrast;
     s_cam->settings.dither = (gbcam_dither_t)s_set.dither;
     s_cam->settings.style = (gbcam_style_t)s_set.style;
+    s_cam->settings.auto_levels = s_set.gb_auto;
+    if (!s_set.gb_auto) {
+        /* Only the contrast half - brightness is applied afterward either
+         * way, from settings.brightness above (see
+         * gbcam_process_pixelcam()'s bias step), so folding it in here too
+         * would double it up. */
+        s_cam->settings.levels_contrast = 0.5f + (s_set.contrast / (float)(GBCAM_CONTRAST_LEVELS - 1)) * 1.5f;
+        s_cam->settings.levels_gamma = 1.0f;
+    }
     gbcam_update_matrix(s_cam);
     settings_changed(&s_set);
 }
@@ -171,6 +196,92 @@ static void brightness_contrast_to_levels(float *contrast, float *gamma)
     *contrast = 0.5f + (s_set.contrast / (float)(GBCAM_CONTRAST_LEVELS - 1)) * 1.5f;
     float g = powf(2.0f, (8 - (int)s_set.brightness) / 8.0f);
     *gamma = g < 0.25f ? 0.25f : (g > 4.0f ? 4.0f : g);
+}
+
+/* PixelBoy's own auto-exposure (ROW_DC_AUTO) - not the same search-for-most-
+ * detail approach GB Camera's PIXEL CAM style uses (gbcam_process_pixelcam.c's
+ * auto_levels - scores 35 candidate curves against the dithered output's
+ * entropy), which doesn't translate cleanly to Dither Cam's arbitrary
+ * palette/quantizer. Simpler and cheaper: measure the live frame's average
+ * luma and solve for the gamma that would pull it to a mid-grey target
+ * ((mean/255)^(1/gamma) = target/255), smoothed frame to frame so it doesn't
+ * hunt visibly. Contrast stays on the manual dial either way - this only
+ * takes over brightness. */
+#define DC_AUTO_TARGET_MEAN 128.0f
+#define DC_AUTO_SMOOTHING 0.1f
+static float dc_auto_compute_gamma(const uint8_t *rgb, int w, int h)
+{
+    static float s_gamma = 1.0f;
+    long sum = 0;
+    int n = w * h;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *p = rgb + (size_t)i * 3;
+        sum += (p[0] * 77 + p[1] * 151 + p[2] * 28) >> 8; /* ITU-R BT.601 luma */
+    }
+    float mean = (float)sum / n;
+    if (mean < 1.0f) mean = 1.0f;
+    if (mean > 254.0f) mean = 254.0f;
+    float target = logf(DC_AUTO_TARGET_MEAN / 255.0f) / logf(mean / 255.0f);
+    target = target < 0.3f ? 0.3f : (target > 3.0f ? 3.0f : target);
+    s_gamma += (target - s_gamma) * DC_AUTO_SMOOTHING;
+    return s_gamma;
+}
+
+/* GB Camera's M64282FP edge enhancement (apply_edge() in gbcam.c), generalized
+ * from its fixed-size 1-channel shades[] to PixelBoy's variable-size RGB888
+ * buffer: 2-D Laplacian on luma, same delta added to all 3 channels so colour
+ * is preserved, each channel clamped independently instead of the original's
+ * symmetric clamp around a grey midpoint (there's no "centre" to clamp around
+ * once colour's involved). Runs before dc_quantize() so the sharpened edges
+ * still go through dithering/palette mapping like everything else. */
+#define DC_EDGE_RATIO_PCT 100
+/* Unsharp mask, not a raw Laplacian tap: a 1-pixel-wide kernel reacts to
+ * sensor noise exactly as strongly as to a real edge, which is what made the
+ * first version (and its dead-zone-threshold patch) come out grainy instead
+ * of sharp - GB Camera's own apply_edge() gets away with the raw tap only
+ * because it runs on an already heavily quantized 4-shade image, not a live
+ * noisy sensor feed. Blurring first averages the single-pixel noise down
+ * before the edge is measured, while a real edge (many pixels wide) survives
+ * the blur mostly intact - so the difference (luma - blurred) isolates real
+ * edges far more cleanly than a small-kernel Laplacian ever can. */
+static void edge_enhance_rgb(uint8_t *rgb, int w, int h)
+{
+    static uint8_t *s_luma, *s_blur;
+    static int s_cap;
+    int n = w * h;
+    if (s_cap < n) {
+        free(s_luma);
+        free(s_blur);
+        s_luma = malloc(n);
+        s_blur = malloc(n);
+        s_cap = (s_luma && s_blur) ? n : 0;
+    }
+    if (!s_luma || !s_blur) return;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *p = rgb + (size_t)i * 3;
+        s_luma[i] = (uint8_t)((p[0] * 77 + p[1] * 151 + p[2] * 28) >> 8);
+    }
+    /* 3x3 box blur, edge pixels clamped to the nearest in-bounds row/col. */
+    for (int y = 0; y < h; y++) {
+        const uint8_t *up = s_luma + (y > 0 ? y - 1 : y) * w;
+        const uint8_t *mid = s_luma + y * w;
+        const uint8_t *dn = s_luma + (y < h - 1 ? y + 1 : y) * w;
+        uint8_t *out = s_blur + y * w;
+        for (int x = 0; x < w; x++) {
+            int lx = x > 0 ? x - 1 : x, rx = x < w - 1 ? x + 1 : x;
+            int sum = up[lx] + up[x] + up[rx] + mid[lx] + mid[x] + mid[rx] + dn[lx] + dn[x] + dn[rx];
+            out[x] = (uint8_t)(sum / 9);
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        int delta = ((int)s_luma[i] - (int)s_blur[i]) * DC_EDGE_RATIO_PCT / 100;
+        if (!delta) continue;
+        uint8_t *px = rgb + (size_t)i * 3;
+        for (int c = 0; c < 3; c++) {
+            int v = px[c] + delta;
+            px[c] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
 }
 
 /* Normal Cam's live preview, capped to roughly 360p's pixel count (640x360 =
@@ -285,8 +396,10 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
     } else if (s_set.cam_mode == CAM_MODE_DITHER) {
         float contrast, gamma;
         brightness_contrast_to_levels(&contrast, &gamma);
+        if (s_set.dc_auto) gamma = dc_auto_compute_gamma(s_dc_rgb, s_dc_live_w, s_dc_live_h);
+        if (s_set.dc_edge) edge_enhance_rgb(s_dc_rgb, s_dc_live_w, s_dc_live_h);
         dc_quantize(s_dc_rgb, s_dc_live_w, s_dc_live_h, s_set.dc_palette, (dc_method_t)s_set.dc_method,
-                   s_set.dc_amount, contrast, gamma, s_dc_rgb, NULL, NULL);
+                   s_set.dc_amount, contrast, gamma, s_dc_rgb, NULL, s_dc_quant_work);
     } else {
         float contrast, gamma;
         brightness_contrast_to_levels(&contrast, &gamma);
@@ -396,6 +509,7 @@ static void enter_gallery(void)
     s_screen = SCREEN_GALLERY;
     s_gallery_pos = storage_count() - 1;
     s_gallery_grid = true;
+    s_grid_cache_page = -1; /* force a fresh decode - see gallery_grid_frame() */
     s_gallery_framed = false;
     s_gallery_dirty = true;
     s_delete_armed_until_us = 0;
@@ -452,11 +566,14 @@ static void build_menu(void)
         s_menu_rows[s_menu_count++] = ROW_STYLE;
         s_menu_rows[s_menu_count++] = ROW_VF_SCALE;
         s_menu_rows[s_menu_count++] = ROW_FRAME;
+        s_menu_rows[s_menu_count++] = ROW_GB_AUTO;
     } else if (s_set.cam_mode == CAM_MODE_DITHER) {
         s_menu_rows[s_menu_count++] = ROW_DC_PALETTE;
         s_menu_rows[s_menu_count++] = ROW_DC_METHOD;
         s_menu_rows[s_menu_count++] = ROW_DC_SIZE;
         s_menu_rows[s_menu_count++] = ROW_DC_AMOUNT;
+        s_menu_rows[s_menu_count++] = ROW_DC_AUTO;
+        s_menu_rows[s_menu_count++] = ROW_DC_EDGE;
     } else { /* CAM_MODE_NORMAL */
         s_menu_rows[s_menu_count++] = ROW_NORMAL_SIZE;
     }
@@ -478,9 +595,9 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
-    char labels[8][12], values[8][12];
-    const char *label_ptrs[8], *value_ptrs[8];
-    icon_id_t icons[8];
+    char labels[9][12], values[9][12];
+    const char *label_ptrs[9], *value_ptrs[9];
+    icon_id_t icons[9];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
@@ -514,6 +631,12 @@ static void draw_menu(void)
             val = values[i];
             icons[i] = ICON_FRAME;
             break;
+        case ROW_GB_AUTO:
+            snprintf(labels[i], sizeof labels[i], "AUTO");
+            snprintf(values[i], sizeof values[i], "%s", s_set.gb_auto ? "ON" : "OFF");
+            val = values[i];
+            icons[i] = ICON_AUTO;
+            break;
         case ROW_DC_PALETTE:
             snprintf(labels[i], sizeof labels[i], "PALETTE");
             truncate_value(values[i], dc_palette_name(s_set.dc_palette));
@@ -542,6 +665,18 @@ static void draw_menu(void)
             icons[i] = ICON_AMOUNT;
             break;
         }
+        case ROW_DC_AUTO:
+            snprintf(labels[i], sizeof labels[i], "AUTO");
+            snprintf(values[i], sizeof values[i], "%s", s_set.dc_auto ? "ON" : "OFF");
+            val = values[i];
+            icons[i] = ICON_AUTO;
+            break;
+        case ROW_DC_EDGE:
+            snprintf(labels[i], sizeof labels[i], "EDGE");
+            snprintf(values[i], sizeof values[i], "%s", s_set.dc_edge ? "ON" : "OFF");
+            val = values[i];
+            icons[i] = ICON_EDGE;
+            break;
         case ROW_NORMAL_SIZE:
             snprintf(labels[i], sizeof labels[i], "SIZE");
             truncate_value(values[i], normal_size_name(s_set.normal_size));
@@ -553,7 +688,7 @@ static void draw_menu(void)
             if (SLEEP_MINUTES[s_set.sleep_min] == 0) snprintf(values[i], sizeof values[i], "NEVER");
             else snprintf(values[i], sizeof values[i], "%d MIN", SLEEP_MINUTES[s_set.sleep_min]);
             val = values[i];
-            icons[i] = ICON_SIZE; /* no dedicated icon - reusing an existing one rather than drawing new art */
+            icons[i] = ICON_SLEEP;
             break;
         case ROW_GALLERY:
             snprintf(labels[i], sizeof labels[i], "GALLERY");
@@ -597,6 +732,10 @@ static void activate_menu_row(void)
         settings_changed(&s_set);
         s_frame_preview_until_us = now_us() + FRAME_PREVIEW_MS * 1000LL;
         break;
+    case ROW_GB_AUTO:
+        s_set.gb_auto = (uint8_t)(s_set.gb_auto ? 0 : 1);
+        apply_settings();
+        break;
     case ROW_DC_PALETTE:
         s_set.dc_palette = (uint8_t)((s_set.dc_palette + 1) % dc_palette_count());
         settings_changed(&s_set);
@@ -616,6 +755,14 @@ static void activate_menu_row(void)
         settings_changed(&s_set);
         break;
     }
+    case ROW_DC_AUTO:
+        s_set.dc_auto = (uint8_t)(s_set.dc_auto ? 0 : 1);
+        settings_changed(&s_set);
+        break;
+    case ROW_DC_EDGE:
+        s_set.dc_edge = (uint8_t)(s_set.dc_edge ? 0 : 1);
+        settings_changed(&s_set);
+        break;
     case ROW_NORMAL_SIZE:
         s_set.normal_size = (uint8_t)((s_set.normal_size + 1) % NORMAL_SIZE_COUNT);
         settings_changed(&s_set);
@@ -847,6 +994,7 @@ static void handle_gallery_input(const input_event_t *ev)
     } else if (ev->type == INPUT_CLICK && ev->button == BTN_CAMMODE) {
         if (now_us() < s_delete_armed_until_us) {
             storage_delete(storage_number_at(s_gallery_pos), storage_is_dc_at(s_gallery_pos));
+            s_grid_cache_page = -1; /* numbers on this page shifted - force a fresh decode */
             s_delete_armed_until_us = 0;
             if (storage_count() == 0) {
                 leave_gallery();
@@ -1039,41 +1187,44 @@ static void downscale_to_native(const uint8_t *rgb, int w, int h, int *out_w, in
     *out_h = nh;
 }
 
+/* Decoding a page's thumbnails (SD read + PNG/JPEG decode, x4) is real work -
+ * enough that redoing it on every single encoder detent (most of which just
+ * move the highlight within the SAME page, not to a different one) made the
+ * grid visibly lag behind the scroll wheel. Cached per cell, keyed by which
+ * page is currently showing (s_grid_cache_* above); only actually redecoded
+ * when the page changes (or the cache is explicitly dropped - a delete or
+ * re-entering the gallery, since either can change what these photo numbers
+ * even are). Moving the highlight within the same page just redraws the
+ * same buffers. */
+static void gallery_grid_cache_drop(void)
+{
+    for (int i = 0; i < GALLERY_GRID_CELLS; i++) {
+        storage_free_dc(s_grid_cache_rgb[i]);
+        s_grid_cache_rgb[i] = NULL;
+    }
+    s_grid_cache_page = -1;
+}
+
 static void gallery_grid_frame(void)
 {
     display_begin_gallery_grid();
     int page = (s_gallery_pos / GALLERY_GRID_CELLS) * GALLERY_GRID_CELLS;
+    if (page != s_grid_cache_page) {
+        gallery_grid_cache_drop();
+        for (int i = 0; i < GALLERY_GRID_CELLS; i++) {
+            int pos = page + i;
+            if (pos >= storage_count()) continue;
+            int number = storage_number_at(pos);
+            bool is_dc = storage_is_dc_at(pos);
+            esp_err_t err = storage_load_thumb(number, is_dc, &s_grid_cache_rgb[i], &s_grid_cache_w[i], &s_grid_cache_h[i]);
+            if (err != ESP_OK) s_grid_cache_rgb[i] = NULL;
+        }
+        s_grid_cache_page = page;
+    }
     for (int i = 0; i < GALLERY_GRID_CELLS; i++) {
         int pos = page + i;
-        if (pos >= storage_count()) {
-            display_grid_cell(i, NULL, 0, 0, false);
-            continue;
-        }
-        int number = storage_number_at(pos);
-        bool is_dc = storage_is_dc_at(pos);
         bool selected = pos == s_gallery_pos;
-        if (is_dc) {
-            uint8_t *rgb;
-            int w, h;
-            if (storage_load_dc(number, &rgb, &w, &h) == ESP_OK) {
-                display_grid_cell(i, rgb, w, h, selected);
-                storage_free_dc(rgb);
-            } else {
-                display_grid_cell(i, NULL, 0, 0, selected);
-            }
-        } else {
-            /* The saved GBnnnnn.PNG, same reasoning as the single-photo view
-             * below - the actual saved palette/frame, not whatever's
-             * currently selected. */
-            uint8_t *rgb;
-            int w, h;
-            if (storage_load_gb_png(number, &rgb, &w, &h) == ESP_OK) {
-                display_grid_cell(i, rgb, w, h, selected);
-                storage_free_dc(rgb);
-            } else {
-                display_grid_cell(i, NULL, 0, 0, selected);
-            }
-        }
+        display_grid_cell(i, s_grid_cache_rgb[i], s_grid_cache_w[i], s_grid_cache_h[i], selected);
     }
 }
 
@@ -1163,6 +1314,7 @@ esp_err_t app_init(void)
     s_cam = plat_calloc_fast(sizeof(gbcam_t));
     s_dc_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
     s_still_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
+    s_dc_quant_work = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3 * sizeof(float));
     /* These three used to be plain static arrays (~165KB combined) - fine on
      * a desktop, but on this board that's ~165KB permanently reserved out of
      * a small internal RAM budget, whether or not a frame's actually being
@@ -1172,7 +1324,7 @@ esp_err_t app_init(void)
     s_still = calloc(1, GBCAM_PIXELS);
     s_frame_rgb = calloc(1, 160 * 224 * 3);
     s_gallery_plain_rgb = calloc(1, GBCAM_W * GBCAM_H * 3);
-    if (!s_cam || !s_dc_rgb || !s_still_rgb || !s_still || !s_frame_rgb || !s_gallery_plain_rgb) {
+    if (!s_cam || !s_dc_rgb || !s_still_rgb || !s_still || !s_frame_rgb || !s_gallery_plain_rgb || !s_dc_quant_work) {
         PLOGE(TAG, "no memory");
         return ESP_ERR_NO_MEM;
     }
@@ -1234,6 +1386,11 @@ esp_err_t app_init(void)
 
     s_stats.t0 = now_us();
     s_last_input_us = now_us(); /* don't count boot itself as idle time - see ROW_SLEEP */
+#ifdef ESP_PLATFORM
+    PLOGI(TAG, "free heap: %u KB internal, %u KB PSRAM",
+          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+#endif
     return ESP_OK;
 }
 
