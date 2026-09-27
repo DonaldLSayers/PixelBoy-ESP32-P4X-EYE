@@ -1,0 +1,15 @@
+# Custom partition table - the built-in "single app (large)" preset doesn't
+# scale to this board's 16MB flash (it's a small fixed size regardless of
+# flash size), and the firmware binary (~1.9MB, with camera ISP/BSP/LVGL
+# pulled in) already overflows it. 4MB for the app leaves comfortable
+# headroom for growth; photos live on the SD card, not flash, so there's no
+# need for a large data partition here. See sdkconfig.defaults'
+# CONFIG_PARTITION_TABLE_CUSTOM.
+# Name,   Type, SubType, Offset,  Size,  Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x400000,
+# Placeholder USB-MSC backing store - a tiny wear-levelled FAT partition the
+# USB port exposes as a drive at boot, before anyone's confirmed they want
+# the real SD card handed over (see app_usb.c). Not used for anything else.
+usbmsc,   data, fat,     0x410000,0x10000,

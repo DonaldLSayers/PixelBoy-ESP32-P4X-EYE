@@ -12,7 +12,7 @@ static const char *TAG = "settings";
 #define NVS_NAMESPACE "gbcam"
 #define NVS_KEY "settings"
 #define SETTLE_US (2 * 1000 * 1000)
-#define SETTINGS_VERSION 7  /* bumped: removed normal_effect */
+#define SETTINGS_VERSION 9  /* bumped: added per-mode adjust[] */
 
 typedef struct {
     uint8_t version;

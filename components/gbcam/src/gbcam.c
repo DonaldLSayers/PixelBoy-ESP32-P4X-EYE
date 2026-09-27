@@ -166,10 +166,15 @@ static int bytes_per_pixel(gbcam_pixfmt_t fmt)
     }
 }
 
-/* Temporal noise reduction: per pixel, move the running average a fraction of
- * the way toward the new value (1/2, 1/4, 1/8 for strength 1..3). A change bigger
- * than MOTION_LEVELS is treated as real movement and taken at once, so moving
- * things don't smear. Runs once per new frame, from gbcam_downsample(). */
+/* Temporal noise reduction: per pixel, move the running average toward the
+ * new value by a blend weight that ramps with the size of the change -
+ * 1/2, 1/4, 1/8 (strength 1..3) at zero delta, rising smoothly to a full 1:1
+ * (no smoothing) once the delta reaches MOTION_LEVELS - rather than a hard
+ * snap-if-bigger-than-threshold cutoff, which ghosts fast movement: a moving
+ * edge's blurred boundary produces a spread of per-frame deltas, and any of
+ * them landing just under a hard threshold gets the full noise-strength
+ * smoothing, i.e. a visible trail of "hasn't caught up yet" frames. Runs
+ * once per new frame, from gbcam_downsample(). */
 #define MOTION_LEVELS 24
 
 static void temporal_denoise(gbcam_t *cam)
@@ -181,14 +186,15 @@ static void temporal_denoise(gbcam_t *cam)
         cam->acc_valid = strength != 0;
         return;
     }
+    const int thresh = MOTION_LEVELS << 8;    /* Q8 */
+    const int base = 256 >> strength;          /* Q8 blend weight at delta = 0 */
     for (int i = 0; i < GBCAM_PIXELS; i++) {
         int target = cam->luma[i] << 8;
         int acc = cam->luma_acc[i];
         int d = target - acc;
-        if (d > MOTION_LEVELS * 256 || d < -MOTION_LEVELS * 256)
-            acc = target;
-        else
-            acc += d / (1 << strength);
+        int ad = d < 0 ? -d : d;
+        int weight = ad >= thresh ? 256 : base + (256 - base) * ad / thresh;
+        acc += d * weight / 256;
         cam->luma_acc[i] = (uint16_t)acc;
         cam->luma[i] = (uint8_t)((acc + 128) >> 8);
     }

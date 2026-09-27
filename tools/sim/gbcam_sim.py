@@ -245,6 +245,7 @@ def main():
             cv2.destroyWindow(physical_win)
 
     def rotate(n):
+        n = -n  # matches the real encoder's direction - see app_input.c's detents negation
         dev.knob_angle += n * math.pi / 12
         dev.highlight(ENCODER)
         lib.sim_input(ROTATE, 4, n)

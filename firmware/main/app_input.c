@@ -64,7 +64,7 @@ static void poll_cb(void *arg)
         int detents = (count - s_enc_last) / ENCODER_COUNTS_PER_DETENT;
         if (detents != 0) {
             s_enc_last += detents * ENCODER_COUNTS_PER_DETENT;
-            post(INPUT_ROTATE, BTN_COUNT, detents);
+            post(INPUT_ROTATE, BTN_COUNT, -detents); /* physical wiring's "clockwise" reads backwards from what feels natural */
         }
     }
 }

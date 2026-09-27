@@ -29,6 +29,7 @@
 #include "stb_image_write.h"
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG /* Normal Cam saves .JPG (storage_save_dc()) - see components/stb/stb_image_impl.c's comment */
 #include "stb_image.h"
 
 #include "app.h"
@@ -36,6 +37,8 @@
 #include "app_display.h"
 #include "app_input.h"
 #include "app_settings.h"
+#include "camera_ppa_esp.h"
+#include "app_usb.h"
 #include "display_hw.h"
 #include "platform.h"
 
@@ -70,7 +73,18 @@ int64_t plat_now_us(void)
     LARGE_INTEGER now;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&now);
-    return (int64_t)(now.QuadPart * 1000000LL / freq.QuadPart);
+    /* now.QuadPart counts from system boot, not process start - on a PC with
+     * more than ~10.7 days of uptime (at a typical 10MHz QPC frequency),
+     * now.QuadPart * 1000000LL overflows int64_t and wraps negative, which
+     * permanently breaks the 15fps throttle in app.c's viewfinder_frame()
+     * (t0 stays negative forever, so it never clears "t0 < s_next_frame_us"
+     * and every frame gets throttle-skipped - the viewfinder looks frozen on
+     * whatever was last drawn, e.g. app_init()'s startup splash). Splitting
+     * into whole seconds + remainder before multiplying avoids the overflow
+     * for any realistic uptime. */
+    int64_t whole = now.QuadPart / freq.QuadPart;
+    int64_t rem = now.QuadPart % freq.QuadPart;
+    return whole * 1000000LL + (rem * 1000000LL) / freq.QuadPart;
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -104,6 +118,28 @@ esp_err_t plat_storage_mount(char *root, size_t len)
     snprintf(root, len, "%s", s_sd_root);
     return ESP_OK;
 }
+
+/* No real battery to read on a PC - a fixed stand-in so the on-screen
+ * indicator can actually be seen and checked in the simulator; real hardware
+ * uses the actual gauge (platform_esp.c's plat_battery_percent()). */
+int plat_battery_percent(void) { return 76; }
+
+/* Nothing to power down or wake from on a PC. */
+void plat_enter_deep_sleep(void) {}
+
+/* No PPA hardware on a PC - dithercam.c's own CPU resample path is used
+ * for everything in the simulator, same as it always has been. */
+esp_err_t camera_ppa_init(void) { return ESP_ERR_NOT_SUPPORTED; }
+
+/* No USB port to plug a PC into on a PC - always inert in the simulator;
+ * real hardware uses app_usb.c. */
+esp_err_t usb_msc_init(void) { return ESP_OK; }
+void usb_msc_tick(void) {}
+bool usb_msc_prompt_pending(void) { return false; }
+bool usb_msc_active(void) { return false; }
+void usb_msc_accept(void) {}
+void usb_msc_decline(void) {}
+void usb_msc_exit(void) {}
 
 /* --------------------------------------------------------------- display_hw */
 

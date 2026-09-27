@@ -4,7 +4,11 @@ CONFIG_IDF_TARGET="esp32p4"
 # Do NOT set CONFIG_ESP32P4_SELECTS_REV_LESS_V3 (that is for the older ESP32-P4-EYE).
 
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# The built-in "single app (large)" table doesn't scale to this board's 16MB
+# flash and is too small for this binary (camera ISP/BSP/LVGL pulled in) -
+# see partitions.csv for the actual layout (4MB app, well within budget).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
@@ -18,7 +22,40 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 CONFIG_CAMERA_OV2710=y
 CONFIG_CAM_CTRL_SPI_ENABLE=n
+# Capture at 1280x720, not the sensor's default 1920x1080 - every preview
+# mode (GB Camera, PixelBoy, Digicam) downscales in software every single
+# frame, and none of them ever need more than 720p (Digicam's own largest
+# preset). Capturing at 1080p meant paying for ~2.25x the source pixels only
+# to throw most of them away in that downscale; this is exactly how both
+# reference implementations do it too (xiao-pixelcam sets camera_config_t.
+# frame_size to a fixed smaller mode at init; the Pi/picamera2 one runs a
+# dedicated small "preview" stream, saving full resolution only for the
+# still actually being saved) - not a per-frame resolution change, since the
+# on-device downscale to whatever exact size/aspect the current mode wants
+# still happens the same way it already did.
+CONFIG_CAMERA_OV2710_MIPI_RAW10_1280X720_25FPS=y
+# CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS is not set
+CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS=y
 
 # LVGL is pulled in by the BSP but not used
 CONFIG_LV_CONF_SKIP=y
 CONFIG_LV_BUILD_EXAMPLES=n
+
+# Long filenames on the SD card (default is 8.3 short names only) - frame/
+# ROM/palette filenames dropped onto /FRAMES, /ROMS, /PALETTES are real
+# names like "nanner-pancakes.hex", not 8.3-safe. Heap-allocated per lookup
+# (simplest option; SPIRAM makes the heap cost a non-issue here).
+CONFIG_FATFS_LFN_HEAP=y
+
+# USB Mass Storage (browse SD card photos from a PC over the "USB" port -
+# see app_usb.c). Uses the OTG HS controller, a separate PHY from the
+# "Debug" port's USB-Serial-JTAG (esp_tinyusb's Kconfig already defaults to
+# the HS port on ESP32-P4), so this doesn't disturb flashing/console use.
+CONFIG_TINYUSB_MSC_ENABLED=y
+# Buffer DMA mode (the default) is back on: it was switched to Slave/IRQ
+# mode to save internal-DMA RAM, but the real fix for that turned out to be
+# display_hw_esp.c's flags.psram_dma_direct (stopped the display's own SPI
+# driver from bounce-copying every frame through that same pool) - Slave
+# mode then showed a different problem instead: it couldn't service real
+# MSC traffic fast enough, so Windows dropped the connection ~3s after
+# enumerating (see app_usb.c's usb_msc_tick()).

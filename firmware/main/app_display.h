@@ -48,6 +48,11 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
 /* Start a new frame filled with one colour (RGB888). */
 void display_begin_blank(uint8_t r, uint8_t g, uint8_t b);
 
+/* True 1:1 (no scaling), centred - cropped if bigger than the screen,
+ * letterboxed in black if smaller. See display_begin_camera() for the
+ * fit-to-screen alternative. */
+void display_begin_native(const uint8_t *rgb888, int w, int h);
+
 /* Text, scaled (1 = 6x8 cell). Lower-case is drawn as upper case. */
 void display_text(int x, int y, int scale, const char *s, uint8_t r, uint8_t g, uint8_t b);
 int display_text_width(const char *s, int scale);
@@ -57,8 +62,11 @@ void display_rect(int x, int y, int w, int h, uint8_t r, uint8_t g, uint8_t b);
 
 /* A 16x16 icon (see icons.h / icons_data.h, generated from assets/icons
  * by tools/gen_icons.py), alpha-blitted (no blending - opaque or nothing,
- * see gen_icons.py) at x,y. */
-void display_icon(int x, int y, icon_id_t id);
+ * see gen_icons.py) at x,y. invert flips every opaque pixel's colour
+ * (~RGB565) - the source art is dark-on-transparent, so an unselected
+ * menu row (black background) needs it to stay visible; the selected
+ * row's white background doesn't. */
+void display_icon(int x, int y, icon_id_t id, bool invert);
 
 /* Dither Cam / Normal Cam preview: an already-quantized/sampled w x h RGB888
  * image (see dithercam.h's DC_SIZE_COUNT presets). With fill=false it's a
@@ -74,6 +82,19 @@ void display_icon(int x, int y, icon_id_t id);
  * one. No bars; use display_osd() for feedback on changes. */
 void display_begin_camera(const uint8_t *rgb888, int w, int h, bool fill);
 
+/* Gallery grid view: a thumbnail album, like the real Game Boy Camera's own
+ * (3x3 there; bigger cells read better on this screen, so 2x2 here).
+ * display_begin_gallery_grid() clears the screen, then call
+ * display_grid_cell() once per cell (row-major, 0..GALLERY_GRID_CELLS-1)
+ * before display_end_frame(). A cell's rgb888/w/h may be NULL/0 to leave it
+ * blank (a page with fewer than GALLERY_GRID_CELLS photos left over).
+ * selected draws a highlight border around that cell. */
+#define GALLERY_GRID_COLS 2
+#define GALLERY_GRID_ROWS 2
+#define GALLERY_GRID_CELLS (GALLERY_GRID_COLS * GALLERY_GRID_ROWS)
+void display_begin_gallery_grid(void);
+void display_grid_cell(int index, const uint8_t *rgb888, int w, int h, bool selected);
+
 /* Menu box over the image: a title and up to 6 rows of "icon  label   value",
  * the selected row drawn inverted. values may be NULL, or an individual
  * value NULL, for action rows (e.g. GALLERY, EXIT). */
@@ -82,6 +103,15 @@ void display_menu(const char *title, const char *const *labels, const char *cons
 
 /* On-screen message box centred on the image, up to two lines. */
 void display_osd(const char *line1, const char *line2);
+
+/* Shutter-closing-then-opening animation over whatever's already drawn this
+ * frame (the frozen just-taken photo) - two black curtains sliding in from
+ * the top and bottom edges to meet at the centre, then back out again.
+ * progress runs 0..1 across the whole animation (closed at 0.5); the caller
+ * drives it (e.g. from how much of the post-shutter freeze window is left)
+ * instead of this owning its own timer, so it always finishes exactly when
+ * the freeze does. Draws nothing at progress <= 0 or >= 1. */
+void display_shutter(float progress);
 
 /* Send the frame to the LCD (asynchronous; double buffered). */
 void display_end_frame(void);
