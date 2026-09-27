@@ -17,7 +17,7 @@ Plan and status: [PLAN.md](PLAN.md).
 | Encoder press (shutter) | Take photo | Activate row | Back |
 | Turn encoder | Adjust the active setting (see Mode) | Move selection | Scroll photos |
 | Mode button | Click: switch which setting the encoder adjusts | — | — |
-| Hold Mode | GB Camera only: style, **PIXEL CAM** (default) ↔ **HARDWARE** | — | — |
+| Hold Mode | GB Camera only: style, **PIXEL CAM** ↔ **HARDWARE** (default)| — | — |
 | Menu button | Click: open the menu | Click: close | Click twice: delete |
 | Hold Menu | Open the gallery | — | Back |
 | Bottom button | Click: next camera mode | — | — |
@@ -95,38 +95,6 @@ is refreshed on every run.
 Press `Ctrl+]` to leave the monitor. If flashing can't connect: hold **Boot (⚙)**, press
 **Reset (↻)**, release Boot, then flash again.
 
-## Simulator: try the camera UI on the PC
-
-Runs the **real firmware app code** (`firmware/main/app.c`, screen drawing, storage) with
-your webcam as the camera, pushed as a full-colour frame — the same format the
-ESP32-P4X-EYE's own camera negotiates — so all three camera modes work in the simulator.
-The window shows exactly what the 240×240 LCD would show.
-
-```powershell
-.\tools\sim\build.ps1                     # rebuild after changing firmware or gbcam code
-python tools\sim\gbcam_sim.py             # --test-pattern (no webcam), --no-sd, --camera-error, --scale 2
-```
-
-| Key / mouse | Control |
-|---|---|
-| Space, Enter, E, or left-click the knob | Encoder press (shutter) |
-| Arrows or mouse wheel | Turn the encoder |
-| 1, or click MENU | Menu button (open/close the menu) |
-| L, or right-click MENU | Menu long press (gallery) |
-| M, 2 | Mode button |
-| N, or right-click MODE | Mode long press (GB Camera only: switch style) |
-| 3, C, or click CAM MODE | Next camera mode |
-| F / O / Q | Mirror webcam / open the simulated SD card / quit |
-| [ / ] | Webcam exposure −1 / +1 EV |
-| A | Webcam auto-exposure on/off (for comparison) |
-
-The webcam's own auto-exposure is **locked off**, so only the Game Boy Camera auto-exposure
-in the firmware runs, as on the real camera. At startup the webcam meters once, then
-exposure and gain stay fixed. Auto-exposure is handed back to the webcam when you quit.
-
-The on-screen buttons are clickable too. Photos and settings go to `sim_data\`
-(`sim_data\sdcard\GBCAM` stands in for the SD card).
-
 ## Tune the look on the PC
 
 ```powershell
@@ -150,8 +118,8 @@ python tools\host\gbcam_live.py            # --camera 1 for a second webcam, --s
 Keys: **M** switches the arrow keys between brightness and contrast; **↑/↓** adjust it;
 **P** palette; **D** dither; **E** edge mode; **R** edge ratio; **F** mirror;
 **[ / ]** webcam exposure; **A** webcam auto-exposure on/off; **H** info bar;
-**Space** saves to `samples/out`; **Q/Esc** quits. As in the simulator, the webcam's own
-auto-exposure is locked off while it runs.
+**Space** saves to `samples/out`; **Q/Esc** quits. The webcam's own auto-exposure is
+locked off while it runs.
 
 ### Styles and accuracy tests
 
@@ -182,8 +150,7 @@ assets/icons       menu row icons, 16x16 PNG (edit these, then run tools/gen_ico
 assets/frames      GB Camera border art, 160x144/160x224 PNG (see GB Camera frames above)
 components/gbcam   portable image core (PC + firmware)
 components/stb     PNG writer
-firmware/          ESP-IDF project (app.c etc. are shared with the simulator)
-tools/sim          PC simulator of the whole camera
+firmware/          ESP-IDF project
 tools/host         PC test tools (photo files, live webcam preview)
 tools/fw.ps1       build/flash helper
 samples/           your test photos (outputs go in samples/out)
@@ -194,7 +161,7 @@ samples/           your test photos (outputs go in samples/out)
 Each menu row's icon is a 16x16 PNG in `assets/icons/` (`palette.png`, `dither.png`,
 `style.png`, `scale.png`, `method.png`, `size.png`, `amount.png`, `denoise.png`,
 `gallery.png`, `exit.png`) - paint over them in any editor that keeps the size and
-transparency, then bake them into the firmware/simulator:
+transparency, then bake them into the firmware:
 
 ```powershell
 python tools\gen_icons.py

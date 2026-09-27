@@ -1,6 +1,5 @@
 /*
- * GB Camera for the ESP32-P4X-EYE: entry point. The app itself is in app.c
- * (shared with the PC simulator in tools/sim).
+ * GB Camera for the ESP32-P4X-EYE: entry point. The app itself is in app.c.
  *
  * Boots straight into a viewfinder with three camera modes (Bottom button cycles):
  *   GB CAMERA    the Game Boy Camera look (PIXEL CAM / HARDWARE style), with

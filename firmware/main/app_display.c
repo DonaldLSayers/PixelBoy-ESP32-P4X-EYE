@@ -1,5 +1,5 @@
-/* Frame composition: image, text, on-screen messages. Platform-neutral;
- * the pixels go out through display_hw (LCD on the board, window in the simulator). */
+/* Frame composition: image, text, on-screen messages. The pixels go out
+ * through display_hw (the LCD). */
 #include <stdio.h>
 #include <string.h>
 
@@ -483,8 +483,8 @@ void display_menu(const char *title, const char *const *labels, const char *cons
     /* Battery, right-justified and vertically centred in the title bar
      * (the 26px strip above the divider line, same one the title sits in) -
      * only while a battery/gauge is actually there to read
-     * (plat_battery_percent() returns -1 otherwise, e.g. the simulator or a
-     * USB-only board), so it's never a fake number. */
+     * (plat_battery_percent() returns -1 otherwise, e.g. a USB-only board),
+     * so it's never a fake number. */
     int batt = plat_battery_percent();
     if (batt >= 0) {
         char buf[16]; /* plat_battery_percent() is 0..100, but sized for any int so -Wformat-truncation can prove it fits */

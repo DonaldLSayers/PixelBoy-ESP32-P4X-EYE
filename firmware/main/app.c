@@ -1,5 +1,5 @@
 /*
- * GB Camera app logic (platform-neutral; runs on the ESP32-P4X-EYE and in the PC simulator).
+ * GB Camera app logic.
  *
  * Boots straight into a viewfinder with three camera modes (Bottom button cycles):
  *   GB CAMERA    the Game Boy Camera look (PIXEL CAM / HARDWARE style), with
