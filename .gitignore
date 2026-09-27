@@ -1,3 +1,4 @@
+.vscode/
 firmware/build/
 firmware/managed_components/
 firmware/sdkconfig
