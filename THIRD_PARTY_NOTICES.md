@@ -6,6 +6,12 @@
 | stb_image, stb_image_write (Sean Barrett) | `components/stb/include` | Public domain / MIT (dual, see headers) | https://github.com/nothings/stb |
 | "Early GameBoy" font (LDEJRuff, via FontStruct) | `assets/fonts/early-gameboy.ttf`, converted to `firmware/main/font8x8.h` by `tools/gen_font.py` | CC BY-SA 3.0, Copyright LDEJRuff 2012 - **share-alike**: derivatives (including this font8x8.h conversion) must stay under the same license. See http://creativecommons.org/licenses/by-sa/3.0/ | not on GitHub - FontStruct (fontstruct.com) |
 
+## Acknowledgments
+
+No code copied, but [Raphael-Boichot](https://github.com/Raphael-Boichot) - whose Game Boy
+Camera/Printer reverse-engineering work informed some of the concepts here (M64282FP sensor
+behaviour, MAC-GBD/GameBoy Printer protocol details) - deserves a thank-you.
+
 ## Colour palettes
 
 Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xiao-pixelcam/sd_card/palettes/`) - almost all from [Lospec](https://lospec.com/palette-list), the pixel-art palette database; credited below to whoever Lospec itself credits (a named artist, or the hardware/software a palette is drawn from, where that's how Lospec lists it). Each is free to use/redistribute per Lospec's site-wide terms, but the individual artist's name should stay attached - hence this table.
