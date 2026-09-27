@@ -1,13 +1,11 @@
 # Third-party notices
 
-| Code | Where | License |
-|---|---|---|
-| gb-photo (Toxa): contrast tables, dither patterns, auto-exposure logic | `components/gbcam/src/gbcam_dither.c`, `gbcam.c` | MIT, Copyright (c) 2022 Toxa. Full text in `gbcam_dither.c` |
-| stb_image, stb_image_write (Sean Barrett) | `components/stb/include` | Public domain / MIT (dual, see headers) |
-| Espressif ESP-IDF, esp32_p4_eye BSP and most managed components (button, knob, led_indicator, esp_cam_sensor, ...) | downloaded at build time, `firmware/managed_components/` | Apache-2.0 (see each component's own `LICENSE`) |
-| Espressif esp_video (camera driver) and esp_ipa (ISP image processing algorithms) | `firmware/managed_components/espressif__esp_video`, `espressif__esp_ipa` - the former used directly by `app_camera.c`, the latter a transitive dependency of the camera/ISP pipeline | "ESPRESSIF MIT License" - an MIT variant restricted to use *on Espressif Systems products* (satisfied here: this firmware only targets the ESP32-P4-EYE). Not the same as plain MIT - don't reuse either component off-Espressif-hardware without checking its own `LICENSE` file. Copyright (c) 2024 Espressif Systems |
-| "Early GameBoy" font (LDEJRuff, via FontStruct) | `early-gameboy.ttf`, converted to `firmware/main/font8x8.h` by `tools/gen_font.py` | CC BY-SA 3.0, Copyright LDEJRuff 2012 - **share-alike**: derivatives (including this font8x8.h conversion) must stay under the same license. See http://creativecommons.org/licenses/by-sa/3.0/ |
-| 5×7 font (fallback glyphs only: `#$%&+/=@\^_`, missing from the font above) | `firmware/main/font5x7.h` | Classic public-domain 5×7 glyph set |
+| Code | Where | License | Source |
+|---|---|---|---|
+| gb-photo (Toxa): contrast tables, dither patterns, auto-exposure logic | `components/gbcam/src/gbcam_dither.c`, `gbcam.c` | MIT, Copyright (c) 2022 Toxa. Full text in `gbcam_dither.c` | https://github.com/untoxa/gb-photo |
+| stb_image, stb_image_write (Sean Barrett) | `components/stb/include` | Public domain / MIT (dual, see headers) | https://github.com/nothings/stb |
+| "Early GameBoy" font (LDEJRuff, via FontStruct) | `early-gameboy.ttf`, converted to `firmware/main/font8x8.h` by `tools/gen_font.py` | CC BY-SA 3.0, Copyright LDEJRuff 2012 - **share-alike**: derivatives (including this font8x8.h conversion) must stay under the same license. See http://creativecommons.org/licenses/by-sa/3.0/ | not on GitHub - FontStruct (fontstruct.com) |
+| 5×7 font (fallback glyphs only: `#$%&+/=@\^_`, missing from the font above) | `firmware/main/font5x7.h` | Classic public-domain 5×7 glyph set | - (no specific source project) |
 
 ## Colour palettes
 
