@@ -38,6 +38,13 @@ Built-in frames are PNGs in `assets/frames/` (160×144 or 160×224) - edit and r
 commercial cartridge or [gb-photo](https://github.com/untoxa/gb-photo) ROM has. These
 ROM/frame-pack files are copyrighted - never commit one (see `.gitignore`).
 
+### Custom palettes
+
+Drop `.hex` files onto the SD card's `/PALETTES` folder (loaded once at boot) - one RGB
+colour per line, 6 hex digits (`#` prefix optional), blank/`#`-comment lines ignored. A
+file with exactly 4 colours shows up as a GB Camera palette; 2-64 colours, as a Dither Cam
+one (so a 4-colour file appears in both). Same format `tools\gen_palettes.py` reads.
+
 ## USB
 
 Plugging the "USB" port (not "Debug") into a PC prompts on-device:
