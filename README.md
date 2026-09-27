@@ -54,6 +54,11 @@ Plugging the "USB" port (not "Debug") into a PC prompts on-device:
 
 Shutter cancels. Both webcam modes show up as a UVC webcam named "PIXELBOY".
 
+## Flash
+
+No build needed: [flash from the browser](https://donaldlsayers.github.io/PIXEL-BOY-ALPHA/)
+(Chrome/Edge, USB cable into the "Debug" port).
+
 ## Build and flash
 
 ```powershell
@@ -89,6 +94,8 @@ assets/frames      GB Camera border art, 160x144/160x224 PNG
 assets/fonts       menu font source (tools/gen_font.py)
 components/gbcam   portable image core (PC + firmware)
 components/stb     PNG writer
+docs/              browser flasher (GitHub Pages) - rebuild firmware, then copy the 3
+                   .bin files from firmware/build/ into docs/firmware/ to update it
 firmware/          ESP-IDF project
 tools/host         PC test tools (photo files, live webcam preview)
 ```
