@@ -115,3 +115,9 @@ void display_shutter(float progress);
 
 /* Send the frame to the LCD (asynchronous; double buffered). */
 void display_end_frame(void);
+
+/* The RGB565 buffer display_end_frame() just sent - whatever's actually on
+ * screen right now (viewfinder, menu, gallery, OSD prompts, all of it),
+ * valid until the next display_begin_*() call. Used for USB "mirror mode"
+ * (see usb_webcam_feed() in app_usb.h) - not needed for normal rendering. */
+const uint16_t *display_last_frame(void);

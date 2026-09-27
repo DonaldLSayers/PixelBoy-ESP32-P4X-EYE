@@ -606,3 +606,5 @@ void display_end_frame(void)
 {
     display_hw_present(s_fb);
 }
+
+const uint16_t *display_last_frame(void) { return s_fb; }

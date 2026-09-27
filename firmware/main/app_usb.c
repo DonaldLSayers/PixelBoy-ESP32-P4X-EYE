@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "esp_partition.h"
 #include "esp_vfs_fat.h"
@@ -9,8 +10,10 @@
 #include "bsp/esp-bsp.h"
 #include "tinyusb.h"
 #include "tusb_msc_storage.h"
+#include "stb_image_write.h" /* implementation lives in components/stb/stb_write_impl.c - just declarations here */
 
 #include "app_usb.h"
+#include "app_usb_video_desc.h"
 #include "platform.h"
 
 static const char *TAG = "usb_msc";
@@ -23,6 +26,64 @@ static sdmmc_card_t *s_sd_card;
 static bool s_active;      /* real SD card handed to the host right now */
 static bool s_prompt;      /* host just connected - waiting on Menu/Shutter */
 static bool s_was_mounted; /* edge-detect for tud_mounted() */
+
+/* -------------------------------------------------------------- webcam (UVC) */
+
+static bool s_webcam_active;
+static uint8_t s_webcam_jpeg[WEBCAM_JPEG_MAX_BYTES];
+static bool s_webcam_tx_busy;
+
+void usb_webcam_accept(void)
+{
+    s_prompt = false;
+    s_webcam_active = true;
+    PLOGI(TAG, "webcam mode - streaming the GB Camera view over USB");
+}
+
+bool usb_webcam_active(void) { return s_webcam_active; }
+
+void usb_webcam_exit(void)
+{
+    s_webcam_active = false;
+    s_webcam_tx_busy = false;
+}
+
+typedef struct { uint8_t *buf; size_t len, cap; } jpeg_write_ctx_t;
+
+static void jpeg_write_cb(void *ctx, void *data, int size)
+{
+    jpeg_write_ctx_t *c = ctx;
+    if (c->len + (size_t)size > c->cap) return; /* shouldn't happen at this frame size/quality, but don't overrun if it ever does */
+    memcpy(c->buf + c->len, data, (size_t)size);
+    c->len += (size_t)size;
+}
+
+void usb_webcam_feed(const uint8_t *rgb888)
+{
+    if (!s_webcam_active || !tud_video_n_streaming(0, 0) || s_webcam_tx_busy) return;
+
+    jpeg_write_ctx_t ctx = { .buf = s_webcam_jpeg, .len = 0, .cap = sizeof s_webcam_jpeg };
+    if (!stbi_write_jpg_to_func(jpeg_write_cb, &ctx, WEBCAM_FRAME_W, WEBCAM_FRAME_H, 3, rgb888, 80)) return;
+
+    s_webcam_tx_busy = true;
+    if (!tud_video_n_frame_xfer(0, 0, s_webcam_jpeg, ctx.len)) s_webcam_tx_busy = false;
+}
+
+void tud_video_frame_xfer_complete_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx)
+{
+    (void)ctl_idx; (void)stm_idx;
+    s_webcam_tx_busy = false;
+}
+
+/* Host negotiates the stream format before it starts pulling frames (UVC
+ * VS_COMMIT_CONTROL) - only one format/frame size is offered (see
+ * app_usb_video_desc.c), so there's nothing to actually pick here, just
+ * accept whatever it asks to commit to. */
+int tud_video_commit_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx, video_probe_and_commit_control_t const *parameters)
+{
+    (void)ctl_idx; (void)stm_idx; (void)parameters;
+    return VIDEO_ERROR_NONE;
+}
 
 static esp_err_t placeholder_attach(void)
 {
@@ -42,8 +103,8 @@ static esp_err_t placeholder_attach(void)
 esp_err_t usb_msc_init(void)
 {
     placeholder_attach();
-    const tinyusb_config_t tusb_cfg = {0};
-    return tinyusb_driver_install(&tusb_cfg);
+    usb_video_desc_init();
+    return tinyusb_driver_install(usb_video_tinyusb_config());
 }
 
 static void sd_host_deinit(void)
@@ -126,14 +187,16 @@ bool usb_msc_active(void) { return s_active; }
 void usb_msc_tick(void)
 {
     bool mounted = tud_mounted();
-    if (mounted && !s_was_mounted && !s_active) s_prompt = true;
+    if (mounted && !s_was_mounted && !s_active && !s_webcam_active) s_prompt = true;
     if (!mounted) s_prompt = false;
     /* tud_mounted() catches a host-initiated disconnect (Windows ejecting
-     * the drive) fine, but NOT an actual cable pull - the vendored TinyUSB
-     * DWC2 port has a literal "TODO check GINTSTS_DISCINT for disconnect
-     * detection" left unimplemented (dcd_dwc2.c), so a real unplug leaves
-     * tud_mounted() stuck true. Shutter (see app.c's handle_usb_input()) is
-     * the reliable way out until that lands upstream. */
+     * the drive, or closing the webcam app) fine, but NOT an actual cable
+     * pull - the vendored TinyUSB DWC2 port has a literal "TODO check
+     * GINTSTS_DISCINT for disconnect detection" left unimplemented
+     * (dcd_dwc2.c), so a real unplug leaves tud_mounted() stuck true.
+     * Shutter (see app.c's handle_usb_input()) is the reliable way out until
+     * that lands upstream. */
     if (s_active && !mounted) usb_msc_exit();
+    if (s_webcam_active && !mounted) usb_webcam_exit();
     s_was_mounted = mounted;
 }

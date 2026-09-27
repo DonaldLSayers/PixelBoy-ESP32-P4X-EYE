@@ -140,6 +140,10 @@ bool usb_msc_active(void) { return false; }
 void usb_msc_accept(void) {}
 void usb_msc_decline(void) {}
 void usb_msc_exit(void) {}
+void usb_webcam_accept(void) {}
+bool usb_webcam_active(void) { return false; }
+void usb_webcam_exit(void) {}
+void usb_webcam_feed(const uint8_t *rgb888) { (void)rgb888; }
 
 /* --------------------------------------------------------------- display_hw */
 
