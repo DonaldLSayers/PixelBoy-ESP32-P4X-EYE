@@ -75,9 +75,36 @@ Boot, then flash again.
 This only flashes the P4 (bootloader, partition table, main app) - the onboard
 ESP32-C6 (WiFi Gallery's radio, see above) is a separate chip with its own
 flash and isn't touched by it. Its network co-processor firmware is flashed
-independently (over its own USB/UART, not through this project's build) and
-stays put across every P4 reflash. `tools/c6_coprocessor` holds that firmware's
-source for reference/rebuilding, but flashing it isn't part of this command.
+independently and stays put across every P4 reflash.
+
+### Flashing the C6 co-processor
+
+Flashed *through* the P4's own USB port: build the C6's firmware, drop it on
+the SD card, then have the P4 push it over the SDIO bus it already shares
+with the C6, via ESP-Hosted's own OTA API (same idea as
+[lboshuizen/crowpanel-p4-c6-sdio-ota](https://github.com/lboshuizen/crowpanel-p4-c6-sdio-ota)).
+This project's version of that lives in `app_wifi_gallery.c`'s
+`flash_coprocessor()`/`wifi_gallery_diag()`.
+
+1. Build the co-processor firmware:
+   ```powershell
+   . C:\Espressif\esp-idf\export.ps1
+   cd tools\c6_coprocessor
+   idf.py set-target esp32c6
+   idf.py build
+   ```
+   Output: `tools\c6_coprocessor\build\eh_cp_transport_sdcard.bin`.
+2. Copy that file onto the SD card's root as `c6_fw.bin`.
+3. `wifi_gallery_diag()` (in `app_wifi_gallery.c`) is what actually pushes it -
+   it's not called from anywhere by default any more (it used to run on every
+   boot, which powered the C6 up whether WiFi Gallery was used or not - see
+   the power note above). Temporarily call it once from `main.c`'s
+   `app_main()`, then build/flash/monitor the P4 as usual (see above) and
+   watch the `wifi_gallery` log tag - it'll report the C6's firmware version,
+   flash it if it's blank/mismatched, and confirm WiFi comes up. Remove the
+   call again afterward.
+
+Only needed once, or if the co-processor firmware itself changes.
 
 ## PC tools
 
