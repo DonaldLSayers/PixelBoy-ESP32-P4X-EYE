@@ -54,18 +54,6 @@ Plugging the "USB" port (not "Debug") into a PC prompts on-device:
 
 Shutter cancels. Both webcam modes show up as a UVC webcam named "PIXELBOY".
 
-## Flash
-
-No build needed. Try the [browser flasher](https://donaldlsayers.github.io/PixelBoy-ESP32-P4X-EYE/)
-(Chrome/Edge, USB cable into the "Debug" port) first - if it fails to connect (a known
-rough edge in ESP32-P4 USB-Serial-JTAG support), download `docs/` and run:
-
-```powershell
-pip install esptool
-cd docs
-.\flash.ps1 -Port COM5   # check the COM number in Device Manager
-```
-
 ## Build and flash
 
 ```powershell
@@ -101,8 +89,6 @@ assets/frames      GB Camera border art, 160x144/160x224 PNG
 assets/fonts       menu font source (tools/gen_font.py)
 components/gbcam   portable image core (PC + firmware)
 components/stb     PNG writer
-docs/              browser flasher (GitHub Pages) - rebuild firmware, then copy the 3
-                   .bin files from firmware/build/ into docs/firmware/ to update it
 firmware/          ESP-IDF project
 tools/host         PC test tools (photo files, live webcam preview)
 ```
