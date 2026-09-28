@@ -1,0 +1,26 @@
+# -- Role: COPROCESSOR --------------------------------------------------
+# ESP-Hosted coprocessor firmware for the ESP32-C6-MINI-1U onboard the
+# ESP32-P4-EYE, matching Espressif's own mcu_hosted_sdio_sdmmc_combined
+# example (the pairing our own host-side config, sdkconfig.defaults in
+# firmware/, is built against). SDIO is the default transport already.
+CONFIG_ESP_HOSTED=y
+CONFIG_ESP_HOSTED_CP=y
+CONFIG_ESP_HOSTED_CP_FOR_MCU=y
+CONFIG_ESP_HOSTED_CP_RPC_V2=y
+
+# Disable enterprise support by default
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+
+# BT off - PIXELBOY only needs WiFi from this
+CONFIG_BT_ENABLED=n
+
+# OTA - dual-slot so eh_host_cp_ota_* (pushed from the P4 over the already-
+# working SDIO link, no external adapter needed) has somewhere to land
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_eh_cp_ota_4m.csv"
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_WIFI_NVS_ENABLED=y
+
+CONFIG_ESP_HOSTED_CP_FEAT_WIFI=y

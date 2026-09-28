@@ -1,5 +1,11 @@
 #pragma once
 
+/* Diagnostic-only for now - brings up just enough of esp_hosted/esp_wifi to
+ * tell whether the C6 answers over SDIO at all, and if so what firmware
+ * it's already running. Call once at boot; see app_wifi_gallery.c. Logs
+ * under tag "wifi_gallery" - watch the serial monitor. */
+void wifi_gallery_diag(void);
+
 /* NOT YET IMPLEMENTED - not in main/CMakeLists.txt's SRCS, this branch is
  * just parking the hardware research needed before writing it.
  *
@@ -70,12 +76,12 @@
  * physically wiring the real board.
  *
  * Next steps once that adapter/wiring is in hand:
- *   1. Build espressif/esp-hosted-mcu's coprocessor firmware (examples/
- *      wifi/*/cp or the mcu_hosted_sdio_sdmmc_combined/cp example, which
- *      matches our exact setup - SD card + C6 sharing one SDMMC
- *      controller), target esp32c6, SDIO transport, flash via TP46/47/44/45
- *      above using its own `eh.py -p <adapter_port> flash` - a one-time
- *      step, wholly separate from this project's own P4 flashing.
+ *   1. Build espressif/esp-hosted-mcu's coprocessor firmware (the
+ *      mcu_hosted_sdio_sdmmc_combined example's "cp" project, which matches
+ *      our exact setup - SD card + C6 sharing one SDMMC controller), target
+ *      esp32c6, SDIO transport, flash via TP46/47/44/45 above using its own
+ *      eh.py, pointed at the adapter's port - a one-time step, wholly
+ *      separate from this project's own P4 flashing.
  *   2. Add app code that actually calls esp_hosted/esp_wifi (AP mode) and
  *      esp_http_server; verify the host<->C6 link comes up with a trivial
  *      "hello" page before building the real gallery. Watch for the known

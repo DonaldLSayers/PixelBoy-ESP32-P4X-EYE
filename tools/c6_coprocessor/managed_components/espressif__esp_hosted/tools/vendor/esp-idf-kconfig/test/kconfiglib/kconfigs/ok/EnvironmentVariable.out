@@ -1,0 +1,8 @@
+#
+# Automatically generated file. DO NOT EDIT.
+# Espressif IoT Development Framework (ESP-IDF)  Project Configuration
+#
+# default:
+CONFIG_SECOND_MOTOR_NUMBER=4
+# default:
+CONFIG_SECOND_MOTOR_NUMBER_AS_STRING="4"

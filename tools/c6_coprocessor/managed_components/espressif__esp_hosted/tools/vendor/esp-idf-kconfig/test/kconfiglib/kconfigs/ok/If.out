@@ -1,0 +1,13 @@
+#
+# Automatically generated file. DO NOT EDIT.
+# Espressif IoT Development Framework (ESP-IDF)  Project Configuration
+#
+
+#
+# menumenu
+#
+# default:
+CONFIG_A=y
+# default:
+CONFIG_IFA=y
+# end of menumenu

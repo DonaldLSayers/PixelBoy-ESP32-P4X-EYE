@@ -1,0 +1,20 @@
+#
+# Automatically generated file. DO NOT EDIT.
+# Espressif IoT Development Framework (ESP-IDF)  Project Configuration
+#
+
+#
+# always visible comment
+#
+# default:
+CONFIG_COMMENTS_SHOWN=y
+
+#
+# Visible conditional comment
+#
+
+#
+# Invisible conditional comment
+#
+# default:
+CONFIG_BELOW_COMMENT=y
