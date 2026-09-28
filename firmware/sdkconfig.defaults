@@ -87,3 +87,11 @@ CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
 CONFIG_ESP32P4_EYE_C6_BOARD=y
 CONFIG_ESP_HOSTED_HOST_TRANSPORT_BUS_SDIO=y
 CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
+# Off (default is on): the stock constructor brings the C6 up (SDIO reset
+# pulse and all) before app_main() even runs, whether or not WIFI GALLERY is
+# ever opened - pure battery drain the rest of the time. With this off,
+# app_wifi_gallery.c's cp_power_up()/cp_power_down() call esp_hosted_init()/
+# esp_hosted_connect_to_slave()/esp_hosted_deinit() themselves, only while
+# the gallery (or the diagnostic) is actually up, and hold the C6 in reset
+# (EN low) the rest of the time.
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n

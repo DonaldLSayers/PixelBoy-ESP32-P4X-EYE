@@ -36,6 +36,7 @@ ICONS = [
     ("ICON_SLEEP", "sleep"),
     ("ICON_AUTO", "auto"),
     ("ICON_EDGE", "edge"),
+    ("ICON_WIFI", "wifi"),
 ]
 
 

@@ -1,19 +1,49 @@
 #pragma once
 
-/* Diagnostic-only for now - brings up just enough of esp_hosted/esp_wifi to
- * tell whether the C6 answers over SDIO at all, and if so what firmware
- * it's already running. Call once at boot; see app_wifi_gallery.c. Logs
- * under tag "wifi_gallery" - watch the serial monitor. */
+#include <stdbool.h>
+
+/* WPA2-PSK needs 8+ chars - fixed, not configurable on-device (there's no
+ * text entry UI); good enough for a short-lived local gallery. Public so
+ * app.c's SCREEN_WIFI info screen can show them alongside the toggle.
+ * WIFI_GALLERY_PASS is all-caps on purpose: app_display.c's font is
+ * uppercase-only (lowercase folds to caps for display), so a mixed-case
+ * password would show wrong on screen - whatever's typed in from there
+ * wouldn't match the real one. SSID doesn't have this problem since it's
+ * picked from a scan list, not typed. */
+#define WIFI_GALLERY_SSID "PixelBoy Gallery"
+#define WIFI_GALLERY_PASS "PIXELBOY1"
+
+/* Diagnostic-only - brings up just enough of esp_hosted/esp_wifi to tell
+ * whether the C6 answers over SDIO at all, and if so what firmware it's
+ * running (and, if it's a blank/stub image, flashes real coprocessor
+ * firmware to it over that same SDIO link via ESP-Hosted's OTA API - see
+ * flash_coprocessor() in app_wifi_gallery.c). Not called from anywhere by
+ * default any more (see the power note on wifi_gallery_start() below) - call
+ * manually if the C6 link needs re-checking. Logs under tag "wifi_gallery" -
+ * watch the serial monitor. */
 void wifi_gallery_diag(void);
 
-/* NOT YET IMPLEMENTED - not in main/CMakeLists.txt's SRCS, this branch is
- * just parking the hardware research needed before writing it.
+/* The real WiFi Gallery - brings the onboard ESP32-C6-MINI-1U up as a WiFi
+ * access point and serves an HTTP photo gallery at http://192.168.4.1/
+ * (reusing app_storage.c's existing index - one grid page of THUMB/
+ * thumbnails, each linking to its full photo for download) so photos can be
+ * browsed/downloaded from a phone with no cable. Wired up in app.c as a menu
+ * row (ROW_WIFI, "WIFI GALLERY") that calls wifi_gallery_start() on click and
+ * switches to SCREEN_WIFI; Shutter there calls wifi_gallery_stop() and
+ * returns to the viewfinder, same shape as the USB picker. Confirmed working
+ * on real hardware.
  *
- * Goal: an on-demand "WiFi Gallery" menu toggle (same pattern as USB's
- * Drive/Mirror/GB Webcam picker) that brings up the board's onboard
- * ESP32-C6-MINI-1U as a WiFi access point and serves a small HTTP photo
- * gallery (reusing app_storage.c's existing index + pre-generated THUMB
- * files) so photos can be browsed/downloaded from a phone with no cable.
+ * The C6 draws no power except between these two calls: sdkconfig.defaults
+ * turns off ESP-Hosted's own auto-init (which otherwise brings the C6 up
+ * before app_main() even runs, whether the gallery's ever opened or not), so
+ * wifi_gallery_start() explicitly powers the C6 up (esp_hosted_init() +
+ * esp_hosted_connect_to_slave()) and wifi_gallery_stop() powers it back down
+ * (esp_hosted_deinit(), then holds it in reset - EN low) every time. */
+void wifi_gallery_start(void);
+void wifi_gallery_stop(void);
+bool wifi_gallery_active(void);
+
+/* Hardware background, kept for context.
  *
  * The P4 has no WiFi radio of its own - it talks to the onboard C6 over
  * SDIO via ESP-Hosted (the C6 runs its own separate "network co-processor"
@@ -49,47 +79,27 @@ void wifi_gallery_diag(void);
  * own datasheet) - nothing unusual there, all the board-specific info is
  * the P4-side GPIO list above.
  *
- * STATUS: host side is DONE and builds clean - main/idf_component.yml pulls
- * espressif/esp_hosted (host role, MCU type, ESP32C6 target, SDIO transport,
- * slot 1 since the real SD card already owns slot 0), and
- * sdkconfig.defaults' CONFIG_ESP32P4_EYE_C6_BOARD=y selects this exact
- * board's pin preset - which, reassuringly, matches the schematic-derived
- * pin list above exactly (CMD=27, CLK=28, D0-D3=29-32, EN=9). No app code
- * calls into it yet, so nothing actually runs.
+ * The C6's own network co-processor firmware was flashed directly over USB
+ * (a UART adapter jumper-wired to the board's TP44-48 test points, not the
+ * SDIO-OTA path flash_coprocessor() offers as a fallback), separately from
+ * this project's own P4 build. tools/c6_coprocessor holds that build
+ * (espressif/esp-hosted-mcu's mcu_hosted_sdio_sdmmc_combined example's "cp"
+ * project) for reference/rebuilding, but the flashing itself happened
+ * outside this repo.
  *
- * REMAINING BLOCKER: the C6 needs its own separate co-processor firmware
- * (a small, fixed "network adapter" image, not our code) flashed onto it
- * before any of this can talk to it - and the P4's single USB port can't
- * reach the C6 for that. The board's own user guide confirms dedicated
- * test points exist for exactly this ("Provides access points for
- * programming and testing the ESP32-C6-MINI-1U; can be connected via
- * Dupont wires"), and the schematic (same "04_WiFi&BT" sheet) names them:
- *
- *   TP44 = C6_EN
- *   TP45 = C6_BOOT
- *   TP46 = C6_U0RXD  (C6's RX - drive from the adapter's TX)
- *   TP47 = C6_U0TXD  (C6's TX - feeds the adapter's RX)
- *   TP48 = GND
- *
- * Needs a 3.3V USB-to-serial adapter (e.g. CP2102/FTDI) jumper-wired to
- * those five points - not available in this session, since it requires
- * physically wiring the real board.
- *
- * Next steps once that adapter/wiring is in hand:
- *   1. Build espressif/esp-hosted-mcu's coprocessor firmware (the
- *      mcu_hosted_sdio_sdmmc_combined example's "cp" project, which matches
- *      our exact setup - SD card + C6 sharing one SDMMC controller), target
- *      esp32c6, SDIO transport, flash via TP46/47/44/45 above using its own
- *      eh.py, pointed at the adapter's port - a one-time step, wholly
- *      separate from this project's own P4 flashing.
- *   2. Add app code that actually calls esp_hosted/esp_wifi (AP mode) and
- *      esp_http_server; verify the host<->C6 link comes up with a trivial
- *      "hello" page before building the real gallery. Watch for the known
- *      SDMMC-controller-sharing quirk esp-idf#16233 flags (workaround shown
- *      in that combined example's main/esp_hosted_wifi.c).
- *   3. Gallery page: reuse storage_count()/storage_number_at()/
- *      storage_is_dc_at()/storage_load_thumb() (app_storage.h) - the same
- *      index and pre-generated thumbnails the on-device gallery already
- *      uses - plus a download route serving the full photo file.
- *   4. Wire a menu toggle (ROW_WIFI, same shape as the USB picker) in app.c.
+ * Two real-hardware bugs found and fixed getting here, both worth knowing
+ * about if this ever regresses:
+ *   - SCREEN_WIFI closed itself within about a second of opening: ROW_WIFI
+ *     activates on the menu's Shutter *press* (app.c's activate_menu_row()),
+ *     so that same press's later release arrived as an INPUT_CLICK on the
+ *     very next app_step(), which the exit handler was also listening for -
+ *     instantly closing the screen it had just opened. Fixed by listening
+ *     for INPUT_PRESS instead (matches ROW_GALLERY's leave_gallery(), which
+ *     has the same shape and already dodged this).
+ *   - Loading the gallery page rebooted the board: esp_http_server's default
+ *     task stack (4KB) blew its stack canary (Guru Meditation: Stack
+ *     protection fault in task "httpd", inside snprintf) - our handlers'
+ *     own snprintf() calls on top of the server's request parsing didn't
+ *     fit. Fixed by setting httpd_config_t.stack_size = 8192 in
+ *     wifi_gallery_start().
  */

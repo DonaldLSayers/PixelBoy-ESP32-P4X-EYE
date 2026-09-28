@@ -16,5 +16,6 @@ typedef enum {
     ICON_SLEEP,
     ICON_AUTO,
     ICON_EDGE,
+    ICON_WIFI,
     ICON_COUNT
 } icon_id_t;

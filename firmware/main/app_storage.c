@@ -415,6 +415,50 @@ esp_err_t storage_load_thumb(int number, bool is_dc, uint8_t **out_rgb, int *out
     return ESP_OK;
 }
 
+bool storage_photo_path(int number, bool is_dc, char *out, size_t len, const char **out_content_type)
+{
+    FILE *f;
+    if (is_dc) {
+        /* Dither Cam's PNG or Normal Cam's JPG - see app_storage.h. */
+        path_for(out, len, "DC", number, "PNG");
+        if ((f = fopen(out, "rb")) != NULL) {
+            fclose(f);
+            *out_content_type = "image/png";
+            return true;
+        }
+        path_for(out, len, "DC", number, "JPG");
+        if ((f = fopen(out, "rb")) != NULL) {
+            fclose(f);
+            *out_content_type = "image/jpeg";
+            return true;
+        }
+        return false;
+    }
+    path_for(out, len, "GB", number, "PNG");
+    if ((f = fopen(out, "rb")) == NULL) return false;
+    fclose(f);
+    *out_content_type = "image/png";
+    return true;
+}
+
+bool storage_thumb_path(int number, bool is_dc, char *out, size_t len)
+{
+    thumb_path_for(out, len, is_dc ? "DC" : "GB", number);
+    FILE *f = fopen(out, "rb");
+    if (f) {
+        fclose(f);
+        return true;
+    }
+    /* Not cached yet - storage_load_thumb() generates and writes it to
+     * THUMB/ as a side effect; the decoded pixels it hands back aren't
+     * needed here, just the file it left behind. */
+    uint8_t *rgb;
+    int w, h;
+    if (storage_load_thumb(number, is_dc, &rgb, &w, &h) != ESP_OK) return false;
+    storage_free_dc(rgb);
+    return true;
+}
+
 esp_err_t storage_delete(int number, bool is_dc)
 {
     char path[300];
