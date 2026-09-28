@@ -26,11 +26,15 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_partition.h"
+#include "esp_spiffs.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 
+#include "app_display.h"
 #include "app_storage.h"
 #include "app_wifi_gallery.h"
+#include "platform.h"
 
 static const char *TAG = "wifi_gallery";
 
@@ -46,24 +50,55 @@ static void log_cp_version(void)
         ESP_LOGW(TAG, "C6 firmware version query failed (normal for very old/blank coprocessor firmware)");
 }
 
-/* Streams storage_root()/c6_fw.bin (dropped there by hand for now) to the
- * C6 over the SDIO/RPC link. Returns true if the whole file was written
- * and the image was marked pending-boot. */
+/* Brief on-screen status - wifi_gallery_diag() is normally only wired in
+ * temporarily (see app_wifi_gallery.h), so whoever's doing that is watching
+ * the screen, not necessarily a serial monitor. */
+static void screen_status(const char *l1, const char *l2)
+{
+    display_begin_blank(0, 0, 0);
+    display_text(DISP_W / 2 - display_text_width(l1, 2) / 2, 100, 2, l1, 255, 255, 255);
+    if (l2) display_text(DISP_W / 2 - display_text_width(l2, 1) / 2, 130, 1, l2, 200, 200, 200);
+    display_end_frame();
+}
+
+#define C6FW_MOUNT "/c6fw"
+#define C6FW_LABEL "c6fw"
+
+/* Streams firmware/c6fw_image/c6_fw.bin (built into the c6fw partition by
+ * the top-level CMakeLists.txt - see partitions.csv) to the C6 over the
+ * SDIO/RPC link. Returns true if the whole file was written and the image
+ * was marked pending-boot. */
 static bool flash_coprocessor(void)
 {
-    char path[300];
-    snprintf(path, sizeof path, "%s/c6_fw.bin", storage_root());
-
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        ESP_LOGW(TAG, "%s not found - drop the built coprocessor firmware there to flash it", path);
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = C6FW_MOUNT,
+        .partition_label = C6FW_LABEL,
+        .max_files = 1,
+        .format_if_mount_failed = false,
+    };
+    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "c6fw partition mount failed: %s - nothing to flash the C6 with "
+                      "(drop the built firmware in firmware/c6fw_image/, see README)", esp_err_to_name(err));
         return false;
     }
 
-    esp_err_t err = esp_hosted_cp_ota_begin();
+    char path[64];
+    snprintf(path, sizeof path, "%s/c6_fw.bin", C6FW_MOUNT);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        ESP_LOGW(TAG, "%s not found - drop the built coprocessor firmware in firmware/c6fw_image/ and reflash to update it", path);
+        esp_vfs_spiffs_unregister(C6FW_LABEL);
+        return false;
+    }
+
+    screen_status("FLASHING C6...", "DO NOT DISCONNECT");
+
+    err = esp_hosted_cp_ota_begin();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_hosted_cp_ota_begin: %s", esp_err_to_name(err));
         fclose(f);
+        esp_vfs_spiffs_unregister(C6FW_LABEL);
         return false;
     }
 
@@ -81,6 +116,7 @@ static bool flash_coprocessor(void)
         total += n;
     }
     fclose(f);
+    esp_vfs_spiffs_unregister(C6FW_LABEL);
     if (!ok) return false;
 
     ESP_LOGI(TAG, "wrote %u bytes to the C6", (unsigned)total);
@@ -96,6 +132,16 @@ static bool flash_coprocessor(void)
         return false;
     }
     ESP_LOGI(TAG, "C6 firmware update staged - resetting the link to boot into it");
+
+    /* Reclaim the c6fw partition now that it's done its job - the image
+     * that was just streamed to the C6 stays there; this was only this
+     * project's own staging copy. Not required for correctness (the same
+     * image would just get rewritten harmlessly on the next flash), just
+     * tidy - matches deleting c6_fw.bin off an SD card by hand, but
+     * automatic. */
+    const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, C6FW_LABEL);
+    if (part) esp_partition_erase_range(part, 0, part->size);
+
     return true;
 }
 
@@ -172,11 +218,41 @@ static void cp_power_down(void)
     gpio_set_level(s_cp_reset_pin.pin, 0);
 }
 
+/* One-step flash: main.c calls this unconditionally at every boot. Reading
+ * the c6fw partition is just the P4's own local flash - no C6/SDIO power-up
+ * needed for that part - so checking "is anything actually staged" is cheap
+ * enough to always do. Only powers the C6 up and runs the real check-and-
+ * flash (wifi_gallery_diag(), the slow/battery-costing part) if
+ * firmware/c6fw_image/c6_fw.bin was actually dropped in and reflashed;
+ * otherwise (the normal case - nothing staged, or a previous flash already
+ * erased it) this returns almost immediately and boot stays fast. */
+void wifi_gallery_check_c6_update(void)
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = C6FW_MOUNT,
+        .partition_label = C6FW_LABEL,
+        .max_files = 1,
+        .format_if_mount_failed = false,
+    };
+    if (esp_vfs_spiffs_register(&conf) != ESP_OK) return; /* nothing staged */
+
+    char path[64];
+    snprintf(path, sizeof path, "%s/c6_fw.bin", C6FW_MOUNT);
+    FILE *f = fopen(path, "rb");
+    bool staged = f != NULL;
+    if (f) fclose(f);
+    esp_vfs_spiffs_unregister(C6FW_LABEL);
+    if (!staged) return;
+
+    wifi_gallery_diag();
+}
+
 void wifi_gallery_diag(void)
 {
     if (!ensure_base_init()) return;
     if (!cp_power_up()) return;
 
+    screen_status("CHECKING C6...", NULL);
     esp_netif_create_default_wifi_sta();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -184,11 +260,13 @@ void wifi_gallery_diag(void)
     ESP_LOGI(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
     log_cp_version();
 
+    bool flashed = false;
     if (err != ESP_OK) {
         /* Not working yet - flash real coprocessor firmware over the
          * transport (already up as a side effect of esp_wifi_init() even
          * though it failed) and retry. */
-        if (flash_coprocessor()) {
+        flashed = flash_coprocessor();
+        if (flashed) {
             esp_wifi_deinit();
             err = esp_wifi_init(&cfg);
             ESP_LOGI(TAG, "post-flash esp_wifi_init: %s", esp_err_to_name(err));
@@ -198,7 +276,11 @@ void wifi_gallery_diag(void)
     if (err == ESP_OK) {
         ESP_LOGW(TAG, "C6 WiFi is up and working!");
         esp_wifi_deinit();
+        screen_status(flashed ? "C6 FLASHED OK" : "C6 WIFI OK", NULL);
+    } else {
+        screen_status("C6 WIFI FAILED", flashed ? "FLASHED, BUT WIFI STILL FAILS" : "SEE SERIAL LOG");
     }
+    plat_sleep_ms(2000); /* let the result actually be read before app_step()'s own drawing resumes */
     /* Diagnostic-only - nothing keeps running after this, so the C6 goes
      * back off the same as wifi_gallery_stop() does. */
     cp_power_down();
