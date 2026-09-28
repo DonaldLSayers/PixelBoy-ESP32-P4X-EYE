@@ -13,3 +13,14 @@ factory,  app,  factory, 0x10000, 0x400000,
 # USB port exposes as a drive at boot, before anyone's confirmed they want
 # the real SD card handed over (see app_usb.c). Not used for anything else.
 usbmsc,   data, fat,     0x410000,0x10000,
+# Holds the C6 co-processor's own firmware image (see app_wifi_gallery.c's
+# flash_coprocessor() and the README's "Flashing the C6 co-processor") - a
+# SPIFFS image built from firmware/c6fw_image/ by the top-level CMakeLists.txt
+# (spiffs_create_partition_image), flashed automatically by idf.py flash like
+# any other partition. 16MB flash total, only ~4.1MB spoken for above, so
+# this costs nothing from the app partition's own budget - separate flash
+# region entirely. 0x180000 = 1.5MB: SPIFFS's own per-file/per-block overhead
+# means a tight 1.125MB (barely over the ~1.07MB C6 firmware image) actually
+# failed to fit at build time (spiffsgen.py: SpiffsFullError) - this leaves
+# real headroom instead of chasing the overhead exactly.
+c6fw,     data, spiffs,  0x420000,0x180000,
