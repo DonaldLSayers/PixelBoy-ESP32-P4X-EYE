@@ -132,17 +132,23 @@ static bool flash_coprocessor(void)
         return false;
     }
     ESP_LOGI(TAG, "C6 firmware update staged - resetting the link to boot into it");
+    return true;
+}
 
-    /* Reclaim the c6fw partition now that it's done its job - the image
-     * that was just streamed to the C6 stays there; this was only this
-     * project's own staging copy. Not required for correctness (the same
-     * image would just get rewritten harmlessly on the next flash), just
-     * tidy - matches deleting c6_fw.bin off an SD card by hand, but
-     * automatic. */
+/* Reclaim the c6fw partition - the staged image (if any) has done its job,
+ * whether that meant actually flashing the C6 or finding it already working
+ * without needing to. Not required for correctness (the same image would
+ * just get rewritten harmlessly on the next flash), but skipping it after a
+ * "already working, nothing to flash" outcome specifically was a real bug:
+ * wifi_gallery_diag() would then leave c6_fw.bin staged forever (only
+ * flash_coprocessor()'s own success path erased it), so every single boot
+ * kept re-detecting it and re-running this whole check - confirmed on real
+ * hardware (a freshly-flashed board whose C6 answered fine on the very
+ * first try, since it wasn't truly blank). */
+static void erase_c6fw_partition(void)
+{
     const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, C6FW_LABEL);
     if (part) esp_partition_erase_range(part, 0, part->size);
-
-    return true;
 }
 
 /* nvs/netif/event-loop bring-up shared by wifi_gallery_diag() (STA, for
@@ -276,6 +282,7 @@ void wifi_gallery_diag(void)
     if (err == ESP_OK) {
         ESP_LOGW(TAG, "C6 WiFi is up and working!");
         esp_wifi_deinit();
+        erase_c6fw_partition();
         screen_status(flashed ? "C6 FLASHED OK" : "C6 WIFI OK", NULL);
     } else {
         screen_status("C6 WIFI FAILED", flashed ? "FLASHED, BUT WIFI STILL FAILS" : "SEE SERIAL LOG");
