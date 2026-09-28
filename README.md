@@ -103,6 +103,9 @@ This project's version of that lives in `app_wifi_gallery.c`'s
    watch the `wifi_gallery` log tag - it'll report the C6's firmware version,
    flash it if it's blank/mismatched, and confirm WiFi comes up. Remove the
    call again afterward.
+4. Delete `c6_fw.bin` from the SD card once it's confirmed working - nothing
+   reads it again once esp_wifi_init() succeeds, but no reason to leave a
+   multi-hundred-KB firmware image sitting there.
 
 Only needed once, or if the co-processor firmware itself changes.
 
