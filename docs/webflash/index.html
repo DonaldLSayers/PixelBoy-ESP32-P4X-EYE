@@ -7,7 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
-<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 <style>
   :root {
     --c-darkest: #211e20;
@@ -47,21 +46,44 @@
     padding: 12px 16px;
     margin: 20px 0;
   }
-  esp-web-install-button {
+  button#flash-btn {
     display: block;
-    margin: 24px 0;
-  }
-  esp-web-install-button::part(activate-button) {
+    width: 100%;
     font-family: "Press Start 2P", monospace;
     font-size: 0.8rem;
     background: var(--accent);
     color: var(--c-darkest);
     border: 2px solid var(--fg);
-    padding: 14px 18px;
+    padding: 16px 18px;
     cursor: pointer;
+    margin: 24px 0;
   }
-  esp-web-install-button::part(activate-button):hover {
-    background: var(--fg);
+  button#flash-btn:hover:not(:disabled) { background: var(--fg); }
+  button#flash-btn:disabled { opacity: 0.5; cursor: default; }
+  #progress-wrap {
+    display: none;
+    border: 2px solid var(--border);
+    height: 28px;
+    margin: 16px 0;
+  }
+  #progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.2s;
+  }
+  #log {
+    display: none;
+    background: #000;
+    color: #8f8;
+    font-family: "VT323", monospace;
+    font-size: 18px;
+    border: 2px solid var(--border);
+    padding: 10px 12px;
+    height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    margin: 16px 0;
   }
   footer {
     margin-top: 40px;
@@ -86,18 +108,9 @@
   first.
 </div>
 
-<esp-web-install-button manifest="manifest.json">
-  <button slot="activate">Connect and flash</button>
-  <span slot="unsupported">
-    Your browser doesn't support Web Serial. Try Chrome or Edge instead, or
-    use the <a href="https://github.com/DonaldLSayers/PixelBoy-ESP32-P4X-EYE/releases/tag/v1.0">esptool-based flash package</a>.
-  </span>
-  <span slot="not-allowed">
-    Web Serial is blocked here (page not served over HTTPS?) - use the
-    <a href="https://github.com/DonaldLSayers/PixelBoy-ESP32-P4X-EYE/releases/tag/v1.0">esptool-based flash package</a>
-    instead.
-  </span>
-</esp-web-install-button>
+<button id="flash-btn">Connect and flash</button>
+<div id="progress-wrap"><div id="progress-bar"></div></div>
+<div id="log"></div>
 
 <p>
   On first boot the device detects the staged C6 firmware, flashes it over
@@ -107,11 +120,107 @@
 </p>
 <p>
   If flashing can't connect: hold the board's Boot button, press Reset,
-  release Boot, then try again.
+  release Boot, then try again. If it still fails, use the
+  <a href="https://github.com/DonaldLSayers/PixelBoy-ESP32-P4X-EYE/releases/tag/v1.0">esptool-based flash package</a>
+  instead - it's the most reliable path.
 </p>
 
 <footer>
   <a href="https://github.com/DonaldLSayers/PixelBoy-ESP32-P4X-EYE">Full project source and docs</a>
 </footer>
+
+<script type="module">
+  import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.7.0/bundle.js";
+
+  const FILES = [
+    { path: "bootloader.bin", address: 0x2000 },
+    { path: "partition-table.bin", address: 0x8000 },
+    { path: "gbcam_p4eye.bin", address: 0x10000 },
+    { path: "c6fw.bin", address: 0x420000 },
+  ];
+
+  const btn = document.getElementById("flash-btn");
+  const logEl = document.getElementById("log");
+  const progressWrap = document.getElementById("progress-wrap");
+  const progressBar = document.getElementById("progress-bar");
+
+  function log(line) {
+    logEl.style.display = "block";
+    logEl.textContent += line + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  const terminal = {
+    clean() { logEl.textContent = ""; },
+    writeLine(data) { log(data); },
+    write(data) { log(data); },
+  };
+
+  if (!("serial" in navigator)) {
+    btn.textContent = "Web Serial not supported - use esptool package";
+    btn.disabled = true;
+  }
+
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    progressWrap.style.display = "block";
+    logEl.textContent = "";
+    let transport;
+    try {
+      const port = await navigator.serial.requestPort();
+      transport = new Transport(port, true);
+
+      const esploader = new ESPLoader({
+        transport,
+        baudrate: 115200,
+        terminal,
+      });
+
+      log("Connecting (usb_reset - this board's Debug port is native USB-Serial-JTAG)...");
+      const chip = await esploader.main("usb_reset");
+      log(`Connected: ${chip}`);
+
+      log("Downloading firmware images...");
+      const fileArray = [];
+      for (const f of FILES) {
+        const resp = await fetch(f.path);
+        if (!resp.ok) throw new Error(`couldn't fetch ${f.path}: ${resp.status}`);
+        const data = new Uint8Array(await resp.arrayBuffer());
+        fileArray.push({ data, address: f.address });
+      }
+
+      log("Flashing - do not disconnect...");
+      await esploader.writeFlash({
+        fileArray,
+        flashMode: "dio",
+        flashFreq: "80m",
+        flashSize: "16MB",
+        eraseAll: false,
+        compress: true,
+        reportProgress: (fileIndex, written, total) => {
+          const pct = Math.round((written / total) * 100);
+          progressBar.style.width = pct + "%";
+          if (written === total) log(`${FILES[fileIndex].path}: done`);
+        },
+      });
+
+      log("Resetting device...");
+      await esploader.after("hard_reset");
+      await transport.disconnect();
+
+      progressBar.style.width = "100%";
+      log("Done! The board is rebooting. Watch its screen for the C6 flash status.");
+      btn.textContent = "Flashed - reconnect board to flash again";
+    } catch (err) {
+      log("ERROR: " + (err && err.message ? err.message : String(err)));
+      log("Try: hold the board's Boot button, click the button again, release Boot once it starts connecting.");
+      btn.disabled = false;
+      btn.textContent = "Connect and flash";
+      if (transport) {
+        try { await transport.disconnect(); } catch (_) { /* best effort */ }
+      }
+    }
+  });
+</script>
 </body>
 </html>
