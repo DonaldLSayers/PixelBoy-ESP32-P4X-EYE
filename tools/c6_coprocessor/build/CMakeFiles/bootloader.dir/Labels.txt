@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+E:/PIXELBOY/tools/c6_coprocessor/build/CMakeFiles/bootloader
+E:/PIXELBOY/tools/c6_coprocessor/build/CMakeFiles/bootloader.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/CMakeFiles/bootloader-complete.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+E:/PIXELBOY/tools/c6_coprocessor/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

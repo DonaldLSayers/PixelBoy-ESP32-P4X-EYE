@@ -67,6 +67,14 @@ CONFIG_TINYUSB_MSC_ENABLED=y
 # 29-32, reset/EN=9 - see app_wifi_gallery.h's comment). The real SD card
 # already uses SDMMC slot 0 (app_usb.c's SDMMC_HOST_SLOT_0), so this must
 # be slot 1 - the two share the controller but not the slot.
+# ESP32-P4 has no WiFi radio of its own - esp_wifi.h's own Kconfig options
+# (buffer sizes etc) are gated behind ESP_WIFI_ENABLED, which only defaults
+# on for chips with a real WiFi radio (not P4) but can be set explicitly,
+# same as espressif/esp-hosted-mcu's own host example does (examples/system/
+# mcu_transport_config/mcu_host/sdkconfig.defaults). NOT the same as
+# ESP_HOST_WIFI_ENABLED (a different, competing "native host WiFi"
+# mechanism) - esp_hosted's own CMake refuses to build if that one's also on.
+CONFIG_ESP_WIFI_ENABLED=y
 CONFIG_ESP_HOSTED=y
 CONFIG_ESP_HOSTED_HOST=y
 CONFIG_ESP_HOSTED_HOST_TYPE_MCU=y

@@ -1,0 +1,17 @@
+mainmenu "Test if statement inside Choice with condition depending on choice"
+
+    choice
+        prompt "Test if statement inside Choice"
+	    default FOO
+
+        config FOO
+            bool "foo"
+
+        if FOO
+
+            config BAR # BAR will NOT be part of the choice
+                 bool "bar"
+
+        endif
+
+    endchoice

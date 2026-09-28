@@ -1,0 +1,25 @@
+dependencies:
+  idf:
+    version: '>=5.5'
+description: ESP-Hosted - Unified coprocessor connectivity
+documentation: https://github.com/espressif/esp-hosted-mcu
+license: Apache-2.0
+repository: git://github.com/espressif/esp-hosted-mcu.git
+repository_info:
+  commit_sha: 95e70156a3904fa172b9bb50888a4d7dd23d2f3a
+  path: .
+targets:
+- esp32
+- esp32c2
+- esp32s2
+- esp32s3
+- esp32c3
+- esp32c5
+- esp32c6
+- esp32c61
+- esp32h2
+- esp32h4
+- esp32h21
+- esp32p4
+url: https://github.com/espressif/esp-hosted-mcu
+version: 3.0.9

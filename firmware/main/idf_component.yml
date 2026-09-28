@@ -14,3 +14,8 @@ dependencies:
   # gallery web page. ESP32P4_EYE_C6_BOARD (sdkconfig.defaults) selects this
   # exact board's SDIO pin preset, already built into this component.
   espressif/esp_hosted: "^3.0.9"
+  # esp_hosted's own reference host example requires this alongside it for
+  # ESP32-P4 specifically - it's what makes ESP_WIFI_ENABLED (and the rest of
+  # esp_wifi.h's Kconfig, otherwise gated behind a real WiFi radio) available
+  # on a chip that doesn't have one.
+  espressif/esp_wifi_remote: ">=1.3.1"

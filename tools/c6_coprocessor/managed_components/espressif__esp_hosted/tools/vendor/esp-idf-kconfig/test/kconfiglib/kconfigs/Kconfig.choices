@@ -1,0 +1,47 @@
+mainmenu "Kconfig for testing choices"
+
+choice CHOICE
+    prompt "Prompt for test choice"
+
+    config FIRST
+        bool "FIRST"
+
+    config SECOND
+        bool "SECOND"
+
+    config THIRD
+        bool "THIRD"
+
+endchoice
+
+
+# Use case below tests a situation when choice is deselected by its dependency
+
+config DEPENDEE
+    bool "Symbol enables/disables DEPENDENT_CHOICE"
+    default n
+
+choice DEPENDENT_CHOICE
+    prompt "This choice is dependent on DEPENDEE symbol"
+    depends on DEPENDEE
+
+    config DEPENDENT_FIRST
+        bool "DEPENDENT_FIRST"
+
+    config DEPENDENT_SECOND
+        bool "DEPENDENT_SECOND"
+
+endchoice
+
+# This choice's selection will be improperly changed in sdkconfig.unselect_selected_symbol
+
+choice SELECTING_SYMBOL
+    bool "choice testing improper change of selected symbol"
+
+    config THIS_IS_SELECTED_BY_DEFAULT
+        bool "This symbol is selected by default"
+
+    config THIS_IS_SELECTED_IN_SDKCONFIG
+        bool "This symbol will be selected in sdkconfig"
+
+endchoice

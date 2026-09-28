@@ -1,0 +1,452 @@
+#!/usr/bin/env python
+# SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
+# SPDX-License-Identifier: Apache-2.0
+#
+# Long-running server process uses stdin & stdout to communicate JSON
+# with a caller
+#
+import argparse
+import json
+import os
+import sys
+from json import JSONDecodeError
+from typing import Dict
+from typing import List
+
+import esp_kconfiglib.core as kconfiglib
+import kconfgen.core as kconfgen
+from esp_idf_kconfig import __version__
+
+# Min/Max supported protocol versions
+MIN_PROTOCOL_VERSION = 1
+MAX_PROTOCOL_VERSION = 3
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=f"kconfserver.py v{__version__} - Config Generation Tool",
+        prog=os.path.basename(sys.argv[0]),
+    )
+
+    parser.add_argument("--config", help="Project configuration settings", required=True)
+
+    parser.add_argument("--kconfig", help="Kconfig file with config item definitions", required=True)
+
+    parser.add_argument(
+        "--sdkconfig-rename",
+        help="File with deprecated Kconfig options",
+        required=False,
+    )
+
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Environment to set when evaluating the config file",
+        metavar="NAME=VAL",
+    )
+
+    parser.add_argument(
+        "--env-file",
+        type=argparse.FileType("r"),
+        help="Optional file to load environment variables from. Contents "
+        "should be a JSON object where each key/value pair is a variable.",
+    )
+
+    parser.add_argument(
+        "--version",
+        help="Set protocol version to use on initial status",
+        type=int,
+        default=MAX_PROTOCOL_VERSION,
+    )
+
+    args = parser.parse_args()
+
+    if args.version < MIN_PROTOCOL_VERSION:
+        print(
+            f"Version {args.version} is older than minimum supported protocol version {MIN_PROTOCOL_VERSION}. "
+            "Client is much older than ESP-IDF version?",
+            file=sys.stderr,
+        )
+
+    if args.version > MAX_PROTOCOL_VERSION:
+        print(
+            f"Version {args.version} is newer than maximum supported protocol version {MAX_PROTOCOL_VERSION}. "
+            "Client is newer than ESP-IDF version?",
+            file=sys.stderr,
+        )
+
+    try:
+        args.env = [(name, value) for (name, value) in (e.split("=", 1) for e in args.env)]
+    except ValueError:
+        print(
+            "--env arguments must each contain =. To unset an environment variable, use 'ENV='",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    for name, value in args.env:
+        os.environ[name] = value
+
+    if args.env_file is not None:
+        env = json.load(args.env_file)
+        os.environ.update(env)
+
+    run_server(args.kconfig, args.config, args.sdkconfig_rename)
+
+
+def run_server(kconfig, sdkconfig, sdkconfig_rename, default_version=MAX_PROTOCOL_VERSION):
+    config = kconfiglib.Kconfig(kconfig)
+    sdkconfig_renames = [sdkconfig_rename] if sdkconfig_rename else []
+    sdkconfig_renames_from_env = os.environ.get("COMPONENT_SDKCONFIG_RENAMES")
+    if sdkconfig_renames_from_env:
+        sdkconfig_renames += sdkconfig_renames_from_env.split(";")
+    if sdkconfig_renames:
+        config.load_rename_files(sdkconfig_renames)
+    config.load_config(sdkconfig)
+
+    print("Server running, waiting for requests on stdin...", file=sys.stderr)
+
+    config_dict = kconfgen.get_json_values(config)
+    ranges_dict = get_ranges(config)
+    visible_dict = get_visible(config)
+    if default_version >= 3:
+        defaults_dict = get_sym_default_value_dict(config)
+        warnings = {sym.name: sym.warning for sym in config.unique_defined_syms if sym.warning}
+
+    if default_version == 1:
+        # V1: no 'visibility' key, send value None for any invisible item
+        values_dict = dict((k, v if visible_dict[k] else False) for (k, v) in config_dict.items())
+        json.dump({"version": 1, "values": values_dict, "ranges": ranges_dict}, sys.stdout)
+    else:
+        # V2 onwards: separate visibility from version
+        resp = {
+            "version": default_version,
+            "values": config_dict,
+            "ranges": ranges_dict,
+            "visible": visible_dict,
+        }
+
+        # V3 onwards: send which values have default values
+        if default_version >= 3:
+            resp["defaults"] = defaults_dict
+            resp["warnings"] = warnings
+
+        json.dump(
+            resp,
+            sys.stdout,
+        )
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        try:
+            req = json.loads(line)
+        except JSONDecodeError as e:
+            response = {
+                "version": default_version,
+                "error": [f"JSON formatting error: {e}"],
+            }
+            json.dump(response, sys.stdout)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            continue
+        before = kconfgen.get_json_values(config)
+        before_ranges = get_ranges(config)
+        before_visible = get_visible(config)
+
+        if req["version"] >= 3:
+            before_defaults = get_sym_default_value_dict(config)
+
+        if "load" in req:  # load a new sdkconfig
+            if req.get("version", default_version) == 1:
+                # for V1 protocol, send all items when loading new sdkconfig.
+                # (V2+ will only send changes, same as when setting an item)
+                before = {}
+                before_ranges = {}
+                before_visible = {}
+
+            # if no new filename is supplied, use existing sdkconfig path, otherwise update the path
+            if req["load"] is None:
+                req["load"] = sdkconfig
+            else:
+                sdkconfig = req["load"]
+
+        if "save" in req:
+            if req["save"] is None:
+                req["save"] = sdkconfig
+            else:
+                sdkconfig = req["save"]
+
+        error = handle_request(config, req)
+
+        after = kconfgen.get_json_values(config)
+        after_ranges = get_ranges(config)
+        after_visible = get_visible(config)
+        if req["version"] >= 3:
+            after_defaults = get_sym_default_value_dict(config)
+
+        values_diff = diff(before, after)
+        ranges_diff = diff(before_ranges, after_ranges)
+        visible_diff = diff(before_visible, after_visible)
+        if req["version"] >= 3:
+            defaults_diff = diff(before_defaults, after_defaults)
+
+        if req["version"] == 1:
+            # V1 response, invisible items have value None
+            for k in (k for (k, v) in visible_diff.items() if not v):
+                values_diff[k] = None
+            response = {"version": 1, "values": values_diff, "ranges": ranges_diff}
+        else:
+            # V2+ response, separate visibility values
+            response = {
+                "version": req["version"],
+                "values": values_diff,
+                "ranges": ranges_diff,
+                "visible": visible_diff,
+            }
+            if req["version"] >= 3:
+                # V3 onwards: send which values have default values
+                response["defaults"] = defaults_diff
+
+        if error:
+            for err in error:
+                print(f"Error: {err}", file=sys.stderr)
+            response["error"] = error
+        json.dump(response, sys.stdout)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
+def get_sym_default_value_dict(config: kconfiglib.Kconfig) -> Dict[str, bool]:
+    """
+    Returns a dict with <config symbol>:<has active default value?> pairs.
+    """
+    defaults = dict()
+    for sym in config.unique_defined_syms:
+        defaults[sym.name] = sym.has_active_default_value()
+    return defaults
+
+
+def handle_request(config, req):
+    if "version" not in req:
+        return ["All requests must have a 'version'"]
+
+    if req["version"] < MIN_PROTOCOL_VERSION or req["version"] > MAX_PROTOCOL_VERSION:
+        return [
+            f"Unsupported request version {req['version']}. "
+            f"Server supports versions {MIN_PROTOCOL_VERSION}-{MAX_PROTOCOL_VERSION}"
+        ]
+
+    error = []
+
+    if "load" in req:
+        print(f"Loading config from {req['load']}...", file=sys.stderr)
+        try:
+            config.load_config(req["load"])
+        except Exception as e:
+            error += [f"Failed to load from {req['load']}: {e}"]
+
+    if "set" in req:
+        handle_set(config, error, req["set"])
+
+    if "reset" in req:
+        if req["version"] >= 3:
+            handle_reset(config, error, req["reset"])
+        else:
+            error += [f"Resetting config symbols is not supported in protocol version {req['version']}"]
+
+    if "save" in req:
+        try:
+            print(f"Saving config to {req['save']}...", file=sys.stderr)
+            kconfgen.write_config(config, req["save"])
+        except Exception as e:
+            error += [f"Failed to save to {req['save']}: {e}"]
+
+    return error
+
+
+def handle_reset(config: kconfiglib.Kconfig, error: List[str], to_reset: List[str]) -> None:
+    """
+    Reset the config symbols to their default values.
+    If a symbol is not found, add an error message to the error list.
+
+    Special name "all" can be used to reset all symbols at once.
+    """
+    # Reset the whole configuration to default values
+    if "all" in to_reset:
+        if kconfiglib._recursively_perform_action(config.top_node, kconfiglib._restore_default):
+            print("Reset the whole configuration to default values", file=sys.stderr)
+        else:
+            error.append("Failed to reset the whole configuration to default values")
+        return
+
+    # Theoretically, both menu ID and config symbol names can be uppercase, but "-" will always be in menu IDs
+    # and never in config symbol names; in symbol name, it is forbidden by the grammar. And menu ID has a signature of
+    # <parent-menu-names>-<menu-name>-<filename>-<linenr> => at least one dash (between filename and linenr) will always
+    # be present.
+    sym_names_to_reset = set(sym_name for sym_name in to_reset if "-" not in sym_name)
+    menu_ids_to_reset = set(menu_name for menu_name in to_reset if "-" in menu_name)
+    remainder = set(to_reset) - sym_names_to_reset - menu_ids_to_reset
+    if remainder:
+        error.append(f"Some items to reset were not symbols nor menus: {','.join(remainder)}")
+
+    missing_syms = [sym_name for sym_name in sym_names_to_reset if sym_name not in config.syms]
+    missing_menus = [menu_name for menu_name in menu_ids_to_reset if menu_name not in config.menu_ids]
+
+    if missing_syms:
+        error.append(f"The following config symbol(s) were not found: {', '.join(missing_syms)}")
+    if missing_menus:
+        error.append(f"The following menu(s) were not found: {', '.join(missing_menus)}")
+
+    # replace name keys with the full config symbol for each key:
+    syms = list(config.syms[sym] for sym in sym_names_to_reset if sym not in missing_syms)
+    menus = list(config.menu_ids[menu] for menu in menu_ids_to_reset if menu not in missing_menus)
+
+    for sym in syms:
+        if kconfiglib._restore_default(sym.nodes[0]):
+            print(f"Reset {sym.name} to default value", file=sys.stderr)
+        else:
+            error.append(f"Failed to reset {sym.name} to default value")
+
+    for menu in menus:
+        if kconfiglib._recursively_perform_action(menu, kconfiglib._restore_default):
+            print(f"Reset menu {menu.id} to default values", file=sys.stderr)
+        else:
+            error.append(f"Failed to reset menu {menu.id} to default values")
+
+
+def handle_set(config, error, to_set):
+    missing = [k for k in to_set if k not in config.syms]
+    if missing:
+        error.append(f"The following config symbol(s) were not found: {', '.join(missing)}")
+    # replace name keys with the full config symbol for each key:
+    to_set = dict((config.syms[k], v) for (k, v) in to_set.items() if k not in missing)
+
+    # Work through the list of values to set, noting that
+    # some may not be immediately applicable (maybe they depend
+    # on another value which is being set). Therefore, defer
+    # knowing if any value is unsettable until then end
+
+    while len(to_set):
+        set_pass = [(k, v) for (k, v) in to_set.items() if k.visibility]
+        if not set_pass:
+            break  # no visible keys left
+        for sym, val in set_pass:
+            if sym.type == kconfiglib.BOOL:
+                if val is True:
+                    sym.set_value(2)
+                elif val is False:
+                    sym.set_value(0)
+                else:
+                    error.append(f"Boolean symbol {sym.name} only accepts true/false values")
+            elif sym.type == kconfiglib.HEX:
+                try:
+                    if not isinstance(val, int):
+                        val = int(val, 16)  # input can be a decimal JSON value or a string of hex digits
+                    sym.set_value(hex(val))
+                except ValueError:
+                    error.append(f"Hex symbol {sym.name} can accept a decimal integer or a string of hex digits, only")
+            elif sym.type == kconfiglib.FLOAT:
+                if not kconfiglib.is_float(str(val)):
+                    error.append(f"Float symbol {sym.name} requires a valid float value")
+                else:
+                    # Accept float, int, or string representation of a float
+                    sym.set_value(str(val))
+            else:
+                sym.set_value(str(val))
+            print(f"Set {sym.name}", file=sys.stderr)
+            del to_set[sym]
+
+    if len(to_set):
+        error.append(
+            f"The following config symbol(s) were not visible so were not updated: {', '.join(s.name for s in to_set)}"
+        )
+
+
+def diff(before, after):
+    """
+    Return a dictionary with the difference between 'before' and 'after',
+    for items which are present in 'after' dictionary
+    """
+    diff = dict((k, v) for (k, v) in after.items() if before.get(k, None) != v)
+    return diff
+
+
+def get_ranges(config):
+    ranges_dict = {}
+
+    def is_base_n(i, n):
+        try:
+            int(i, n)
+            return True
+        except ValueError:
+            return False
+
+    def get_active_range(sym):
+        """
+        Returns a tuple of (low, high) numeric values if a range
+        limit is active for this symbol, or (None, None) if no range
+        limit exists.
+        """
+        try:
+            for low_expr, high_expr, cond in sym.ranges:
+                if kconfiglib.expr_value(cond):
+                    if sym.orig_type == kconfiglib.FLOAT:
+                        low = float(low_expr.str_value) if kconfiglib.is_float(low_expr.str_value) else 0.0
+                        high = float(high_expr.str_value) if kconfiglib.is_float(high_expr.str_value) else 0.0
+                    else:
+                        type_to_base = kconfiglib._TYPE_TO_BASE
+                        base = type_to_base[sym.orig_type] if sym.orig_type in type_to_base else 0
+                        low = int(low_expr.str_value, base) if is_base_n(low_expr.str_value, base) else 0
+                        high = int(high_expr.str_value, base) if is_base_n(high_expr.str_value, base) else 0
+                    return (low, high)
+        except ValueError:
+            pass
+        return (None, None)
+
+    def handle_node(node):
+        sym = node.item
+        if not isinstance(sym, kconfiglib.Symbol):
+            return
+        active_range = get_active_range(sym)
+        if active_range[0] is not None:
+            ranges_dict[sym.name] = active_range
+
+    for n in config.node_iter():
+        handle_node(n)
+    return ranges_dict
+
+
+def get_visible(config):
+    """
+    Return a dict mapping node IDs (config names or menu node IDs) to True/False for their visibility
+    """
+    result = {}
+    menus = []
+
+    # when walking the menu the first time, only
+    # record whether the config symbols are visible
+    # and make a list of menu nodes (that are not symbols)
+    def handle_node(node):
+        sym = node.item
+        try:
+            visible = sym.visibility != 0
+            result[node] = visible
+        except AttributeError:
+            menus.append(node)
+
+    for n in config.node_iter():
+        handle_node(n)
+
+    # now, figure out visibility for each menu. A menu is visible if any of its children are visible
+    for m in reversed(menus):  # reverse to start at leaf nodes
+        result[m] = any(v for (n, v) in result.items() if n.parent == m)
+
+    # return a dict mapping the node ID to its visibility.
+    result = dict((n.id, v) for (n, v) in result.items())
+
+    return result
