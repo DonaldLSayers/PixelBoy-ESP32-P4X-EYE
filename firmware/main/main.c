@@ -21,11 +21,13 @@
  * deletes the current photo.
  */
 #include "app.h"
+#include "app_wifi_gallery.h" /* wifi_gallery_check_c6_update() - see its own comment */
 
 void app_main(void)
 {
     if (app_init() != ESP_OK)
         return;
+    wifi_gallery_check_c6_update();
     for (;;)
         app_step();
 }

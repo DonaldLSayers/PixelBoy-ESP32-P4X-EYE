@@ -13,14 +13,27 @@
 #define WIFI_GALLERY_SSID "PixelBoy Gallery"
 #define WIFI_GALLERY_PASS "PIXELBOY1"
 
-/* Diagnostic-only - brings up just enough of esp_hosted/esp_wifi to tell
- * whether the C6 answers over SDIO at all, and if so what firmware it's
- * running (and, if it's a blank/stub image, flashes real coprocessor
- * firmware to it over that same SDIO link via ESP-Hosted's OTA API - see
- * flash_coprocessor() in app_wifi_gallery.c). Not called from anywhere by
- * default any more (see the power note on wifi_gallery_start() below) - call
- * manually if the C6 link needs re-checking. Logs under tag "wifi_gallery" -
- * watch the serial monitor. */
+/* Called unconditionally from main.c at every boot - cheap no-op in the
+ * normal case (nothing staged in the c6fw partition, or a previous flash
+ * already erased it): just reads the P4's own local flash, no C6/SDIO
+ * power-up at all. Only calls through to wifi_gallery_diag() below (which
+ * does power the C6 up - the slow, battery-costing part) if
+ * firmware/c6fw_image/c6_fw.bin was actually built in and reflashed - see
+ * the README's "Setting up a brand new device". One-step: drop the file in,
+ * idf.py flash, it flashes the C6 and reboots on its own; next boot finds
+ * nothing staged (the partition self-erases after a successful flash) and
+ * skips straight past, back to normal fast boot. */
+void wifi_gallery_check_c6_update(void);
+
+/* Diagnostic - brings up just enough of esp_hosted/esp_wifi to tell whether
+ * the C6 answers over SDIO at all, and if so what firmware it's running
+ * (and, if it's a blank/stub image, flashes real coprocessor firmware to it
+ * over that same SDIO link via ESP-Hosted's OTA API - see
+ * flash_coprocessor() in app_wifi_gallery.c). Normally reached through
+ * wifi_gallery_check_c6_update() above, not called directly - call it
+ * yourself only for a manual one-off recheck (e.g. from a debug console).
+ * Logs under tag "wifi_gallery" - watch the serial monitor, or the on-screen
+ * status. */
 void wifi_gallery_diag(void);
 
 /* The real WiFi Gallery - brings the onboard ESP32-C6-MINI-1U up as a WiFi
@@ -87,9 +100,9 @@ bool wifi_gallery_active(void);
  * firmware/c6fw_image/ and flashed automatically alongside the rest by
  * idf.py flash. tools/c6_coprocessor holds that build (espressif/esp-hosted-
  * mcu's mcu_hosted_sdio_sdmmc_combined example's "cp" project) - see the
- * README's "Flashing the C6 co-processor" section for the actual steps
- * (build it, drop it in firmware/c6fw_image/, temporarily wire
- * wifi_gallery_diag() back into main.c to push it over SDIO).
+ * README's "Setting up a brand new device" section for the actual steps
+ * (build it, drop it in firmware/c6fw_image/, reflash the P4 -
+ * wifi_gallery_check_c6_update() picks it up automatically).
  *
  * Two real-hardware bugs found and fixed getting here, both worth knowing
  * about if this ever regresses:

@@ -75,26 +75,20 @@ Boot, then flash again.
 This flashes the P4 (bootloader, partition table, main app, plus the `c6fw`
 staging partition below - all four are in one `flash_args`, one `idf.py
 flash`). The onboard ESP32-C6 chip itself (WiFi Gallery's radio, see above) is
-separate hardware with its own flash and isn't touched by this - its network
-co-processor firmware only actually moves over once `wifi_gallery_diag()`
-pushes it (next section), and stays put on the C6 across every ordinary P4
-reflash after that.
+separate hardware with its own flash and isn't touched by the app/bootloader
+part of this - its network co-processor firmware only actually moves over if
+something's staged in `firmware/c6fw_image/` (next section), and stays put on
+the C6 across every ordinary P4 reflash after that.
 
-### Flashing the C6 co-processor
+### Setting up a brand new device (WiFi Gallery)
 
-The C6 has no exposed UART/USB of its own - its only external link is the
-SDIO bus it already shares with the P4, so its firmware is flashed *through*
-the P4's own USB port instead, over that same SDIO link via ESP-Hosted's own
-OTA API (same idea as
-[lboshuizen/crowpanel-p4-c6-sdio-ota](https://github.com/lboshuizen/crowpanel-p4-c6-sdio-ota)).
-This project's version of that lives in `app_wifi_gallery.c`'s
-`flash_coprocessor()`/`wifi_gallery_diag()`.
+A fresh board's C6 doesn't have ESP-Hosted's co-processor firmware on it yet -
+without it, the P4 build still works fine, WIFI GALLERY in the menu just
+fails ("WIFI FAILED"). To get WiFi Gallery working the first time (or to
+update the C6's firmware later):
 
-The C6 firmware image travels as its own dedicated flash partition (`c6fw` in
-`partitions.csv`, built from whatever's in `firmware/c6fw_image/` - see the
-top-level `CMakeLists.txt`) rather than a file dropped on the SD card by hand:
-
-1. Build the co-processor firmware:
+1. Build the co-processor firmware - a separate ESP-IDF project, own chip
+   target, not part of the P4 build:
    ```powershell
    . C:\Espressif\esp-idf\export.ps1
    cd tools\c6_coprocessor
@@ -105,18 +99,31 @@ top-level `CMakeLists.txt`) rather than a file dropped on the SD card by hand:
 2. Copy that file into `firmware\c6fw_image\c6_fw.bin` (create the folder if
    it's not there - it's gitignored, so nothing this big ends up committed).
 3. Build/flash the P4 as usual (see above) - the `c6fw` partition gets
-   written automatically alongside everything else, no extra step.
-4. `wifi_gallery_diag()` (in `app_wifi_gallery.c`) is what actually pushes the
-   C6 firmware from that partition over SDIO - it's not called from anywhere
-   by default any more (it used to run on every boot, which powered the C6 up
-   whether WiFi Gallery was used or not - see the power note above).
-   Temporarily call it once from `main.c`'s `app_main()`, rebuild/reflash,
-   then watch the `wifi_gallery` log tag (or the on-screen status - it shows
-   "FLASHING C6...", then "C6 FLASHED OK" or "C6 WIFI FAILED"): it reports the
-   C6's firmware version, flashes it if it's blank/mismatched, and confirms
-   WiFi comes up. Remove the call again afterward. A successful flash also
-   erases the `c6fw` partition on the P4 side automatically - nothing to
-   clean up by hand.
+   written automatically alongside everything else, no extra step, and
+   `main.c` already calls `wifi_gallery_check_c6_update()` on every boot. That
+   check itself is cheap (just reads the P4's own flash) and normally a
+   no-op; finding `c6_fw.bin` staged, it powers the C6 up, streams the
+   firmware over SDIO, activates it, and lets ESP-Hosted force a clean host
+   restart to boot into it (expected - a brief screen blank, not a crash).
+   Watch the on-screen status ("CHECKING C6...", "FLASHING C6... DO NOT
+   DISCONNECT", then "C6 FLASHED OK") or the `wifi_gallery` serial log tag.
+4. **Delete `firmware\c6fw_image\c6_fw.bin` once it's confirmed working.**
+   The device erases its own on-flash copy after a successful push, but that
+   doesn't touch this source file - leave it in place and the *next*
+   `idf.py flash` (even an unrelated P4-only change) re-stages it, so every
+   boot after that reflashes the C6 again (confirmed on real hardware: this
+   is why boot suddenly got slower and kept showing a C6 status after an
+   otherwise-unrelated reflash). Deleting the file makes `idf.py flash` write
+   an empty `c6fw` partition instead, and `wifi_gallery_check_c6_update()`
+   goes back to its normal near-zero-cost no-op.
+
+The C6 has no exposed UART/USB of its own - its only external link is the
+SDIO bus it already shares with the P4, so its firmware is flashed *through*
+the P4's own USB port, over that same SDIO link via ESP-Hosted's own OTA API
+(same idea as
+[lboshuizen/crowpanel-p4-c6-sdio-ota](https://github.com/lboshuizen/crowpanel-p4-c6-sdio-ota)).
+This project's version of that lives in `app_wifi_gallery.c`'s
+`flash_coprocessor()`/`wifi_gallery_diag()`/`wifi_gallery_check_c6_update()`.
 
 Confirmed working end to end on real hardware: partition flashed
 automatically, firmware streamed to the C6 byte-for-byte, activated, and the
@@ -125,8 +132,6 @@ partition needs a free slot in the VFS registration table (`CONFIG_VFS_MAX_COUNT
 default 8) - this project's SD card + USB-MSC + console mounts already used
 all of them, so the mount failed with a misleading `ESP_ERR_NO_MEM` (not an
 actual memory shortage). `sdkconfig.defaults` raises it to 10.
-
-Only needed once, or if the co-processor firmware itself changes.
 
 ## PC tools
 
