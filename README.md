@@ -118,6 +118,14 @@ top-level `CMakeLists.txt`) rather than a file dropped on the SD card by hand:
    erases the `c6fw` partition on the P4 side automatically - nothing to
    clean up by hand.
 
+Confirmed working end to end on real hardware: partition flashed
+automatically, firmware streamed to the C6 byte-for-byte, activated, and the
+C6 rebooted into it. One gotcha found along the way: mounting the `c6fw`
+partition needs a free slot in the VFS registration table (`CONFIG_VFS_MAX_COUNT`,
+default 8) - this project's SD card + USB-MSC + console mounts already used
+all of them, so the mount failed with a misleading `ESP_ERR_NO_MEM` (not an
+actual memory shortage). `sdkconfig.defaults` raises it to 10.
+
 Only needed once, or if the co-processor firmware itself changes.
 
 ## PC tools

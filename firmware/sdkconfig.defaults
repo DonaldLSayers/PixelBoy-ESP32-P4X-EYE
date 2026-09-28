@@ -95,3 +95,11 @@ CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
 # the gallery (or the diagnostic) is actually up, and hold the C6 in reset
 # (EN low) the rest of the time.
 CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+
+# Default (8) was already fully spoken for (SD card FATFS, the usbmsc FATFS,
+# console/UART, eventfd, etc) - mounting the c6fw SPIFFS partition
+# (app_wifi_gallery.c's flash_coprocessor()) then failed with ESP_ERR_NO_MEM
+# from esp_vfs_register_fs(), which just means "no free VFS table slot", not
+# an actual memory shortage (confirmed on real hardware: 160KB+ free internal
+# heap at the time). A couple of spares here costs nothing.
+CONFIG_VFS_MAX_COUNT=10
