@@ -1,3 +1,0 @@
-config SOURCED
-    bool "sourced config"
-    default y

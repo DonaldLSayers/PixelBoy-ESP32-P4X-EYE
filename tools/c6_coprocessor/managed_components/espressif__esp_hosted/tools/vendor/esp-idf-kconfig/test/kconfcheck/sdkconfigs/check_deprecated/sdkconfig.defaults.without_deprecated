@@ -1,2 +1,0 @@
-CONFIG_NEW_NAME=y
-CONFIG_UNRELATED="this option is unrelated and should not have any effect to the test"

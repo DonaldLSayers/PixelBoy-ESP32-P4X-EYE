@@ -1,6 +1,0 @@
-# default:
-# CONFIG_ALPHA is not set
-# default:
-CONFIG_BETA=y
-# default:
-# CONFIG_GAMMA is not set
