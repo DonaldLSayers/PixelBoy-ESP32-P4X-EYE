@@ -11,12 +11,14 @@ idf_component_register(SRCS "main.c"
                             "app_storage.c"
                             "app_usb.c"
                             "app_usb_video_desc.c"
+                            "app_wifi_gallery.c"
                             "camera_ppa_esp.c"
                             "display_hw_esp.c"
                             "platform_esp.c"
                        INCLUDE_DIRS "."
                        REQUIRES gbcam stb esp_driver_gpio esp_driver_pcnt esp_lcd esp_timer nvs_flash fatfs
-                                esp_driver_ppa esp_mm esp_driver_sdmmc sdmmc wear_levelling espressif__esp_tinyusb)
+                                esp_driver_ppa esp_mm esp_driver_sdmmc sdmmc wear_levelling espressif__esp_tinyusb
+                                espressif__esp_hosted esp_wifi esp_netif esp_event esp_http_server)
 
 # A handful of snprintf(path, sizeof path, "%s/%s", dir, dirent->d_name) calls
 # (app_frames_sd.c, app_palettes_sd.c - building a path to something just

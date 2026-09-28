@@ -138,10 +138,20 @@ def frame():
     return img
 
 
+def wifi():
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    d.arc((1, 1, 14, 14), start=225, end=315, fill=WHITE, width=2)
+    d.arc((3, 4, 12, 12), start=225, end=315, fill=WHITE, width=2)
+    d.arc((5, 7, 10, 10), start=225, end=315, fill=WHITE, width=2)
+    d.ellipse((6, 11, 9, 14), fill=WHITE)
+    return img
+
+
 ICONS = {
     "palette": palette, "dither": dither, "style": style, "scale": scale,
     "method": method, "size": size, "amount": amount, "denoise": denoise,
-    "gallery": gallery, "exit": exit_icon, "frame": frame,
+    "gallery": gallery, "exit": exit_icon, "frame": frame, "wifi": wifi,
 }
 
 
