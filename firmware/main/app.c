@@ -68,6 +68,14 @@ typedef struct {
 } osd_t;
 
 static gbcam_t *s_cam;
+/* RGB palette (see ROW_PALETTE's sentinel value, rgb_mode_active()): the
+ * same GB Camera pipeline (exposure, edge enhancement, threshold dither) run
+ * independently on the sensor's red/green/blue channels instead of luma -
+ * the digital equivalent of the real camera's physical-filter trick, minus
+ * the physical filters. Own gbcam_t per channel so each gets its own
+ * auto-exposure, same as each real filtered exposure would. */
+static gbcam_t *s_cam_r, *s_cam_g, *s_cam_b;
+static uint8_t *s_rgb_mode_rgb; /* combined RGB888 result, GBCAM_W x GBCAM_H x 3 */
 static app_settings_t s_set;
 static screen_t s_screen = SCREEN_VIEWFINDER;
 static adjust_t s_adjust = ADJUST_0;
@@ -162,22 +170,37 @@ static void draw_osd(void)
     display_osd(s_osd.line1, s_osd.line2, NULL);
 }
 
-static void apply_settings(void)
+static void apply_settings_to(gbcam_t *cam)
 {
-    s_cam->settings.brightness = s_set.brightness;
-    s_cam->settings.contrast = s_set.contrast;
-    s_cam->settings.dither = (gbcam_dither_t)s_set.dither;
-    s_cam->settings.style = (gbcam_style_t)s_set.style;
-    s_cam->settings.auto_levels = s_set.gb_auto;
+    cam->settings.brightness = s_set.brightness;
+    cam->settings.contrast = s_set.contrast;
+    cam->settings.dither = (gbcam_dither_t)s_set.dither;
+    cam->settings.style = (gbcam_style_t)s_set.style;
+    cam->settings.auto_levels = s_set.gb_auto;
     if (!s_set.gb_auto) {
         /* Only the contrast half - brightness is applied afterward either
          * way, from settings.brightness above (see
          * gbcam_process_pixelcam()'s bias step), so folding it in here too
          * would double it up. */
-        s_cam->settings.levels_contrast = 0.5f + (s_set.contrast / (float)(GBCAM_CONTRAST_LEVELS - 1)) * 1.5f;
-        s_cam->settings.levels_gamma = 1.0f;
+        cam->settings.levels_contrast = 0.5f + (s_set.contrast / (float)(GBCAM_CONTRAST_LEVELS - 1)) * 1.5f;
+        cam->settings.levels_gamma = 1.0f;
     }
-    gbcam_update_matrix(s_cam);
+    gbcam_update_matrix(cam);
+}
+
+static void apply_settings(void)
+{
+    apply_settings_to(s_cam);
+    /* Keep the RGB palette's three per-channel instances (s_cam_r/g/b) in
+     * lockstep with s_cam's own settings - only their gbcam_frame_t.channel
+     * differs (see rgb_mode_active()'s callers). Lazily allocated (see
+     * rgb_mode_ensure_ready()), so still NULL for anyone who's never
+     * selected RGB this session - nothing to sync yet. */
+    if (s_cam_r) {
+        apply_settings_to(s_cam_r);
+        apply_settings_to(s_cam_g);
+        apply_settings_to(s_cam_b);
+    }
     settings_changed(&s_set);
 }
 
@@ -326,6 +349,96 @@ typedef struct {
 
 static void gb_frame_cb(const gbcam_frame_t *f, void *ctx) { gbcam_downsample((gbcam_t *)ctx, f); }
 
+/* RGB palette selected (see rgb_mode_active()) - three downsample passes
+ * over the same grabbed frame, one per colour channel, instead of gb_frame_cb's
+ * one luma pass. ctx unused (always s_cam_r/g/b, not whatever camera_grab()
+ * was handed as ctx). */
+static void gb_frame_cb_rgb(const gbcam_frame_t *f, void *ctx)
+{
+    (void)ctx;
+    gbcam_frame_t cf = *f;
+    cf.channel = GBCAM_CHANNEL_RED;   gbcam_downsample(s_cam_r, &cf);
+    cf.channel = GBCAM_CHANNEL_GREEN; gbcam_downsample(s_cam_g, &cf);
+    cf.channel = GBCAM_CHANNEL_BLUE;  gbcam_downsample(s_cam_b, &cf);
+}
+
+/* ROW_PALETTE cycles through gbcam_palette_count() real palettes plus this
+ * one extra sentinel slot ("RGB" - see draw_menu()/activate_menu_row()),
+ * rather than teaching the gbcam library's palette abstraction (a plain
+ * shade -> colour lookup) about a mode that doesn't fit it: three
+ * independent channels, not one shade. gbcam_palette_rgb() itself tolerates
+ * being called with this out-of-range value regardless (falls back to the
+ * default palette), so accidentally leaving a call site unguarded degrades
+ * rather than crashes.
+ *
+ * The s_cam_r check matters at boot: s_set.palette is persisted, so a saved
+ * RGB selection reloads as the sentinel value before anything's called
+ * rgb_mode_ensure_ready() this session (that only happens from the menu/
+ * quick-select actually cycling onto it - see activate_menu_row()/
+ * rotate_viewfinder()). Without this check the very first viewfinder frame
+ * would read s_cam_r/g/b as NULL and crash - which then reboots straight
+ * back into the same persisted setting, a boot loop. Falling back to the
+ * plain GB pipeline instead (with the sentinel value harmlessly hitting
+ * gbcam_palette_rgb()'s own fallback above) lets the device boot; cycling
+ * PALETTE again properly allocates and switches over. */
+static bool rgb_mode_active(void)
+{
+    return s_set.cam_mode == CAM_MODE_GB && s_set.palette == (uint8_t)gbcam_palette_count() && s_cam_r;
+}
+
+/* s_cam_r/g/b/s_rgb_mode_rgb are allocated on first use, not at boot like
+ * s_cam - s_cam itself uses plat_calloc_fast() (internal RAM, for the tight
+ * per-pixel dither/exposure loop's sake), and this board's internal RAM is
+ * tight enough (~220KB free after boot) that three more gbcam_t (~70KB each)
+ * there would starve every other allocation, whether or not anyone ever
+ * selects RGB. Plain calloc() instead - PSRAM-backed automatically past 16KB
+ * (see app_init()'s own comment on s_still/s_frame_rgb/etc) - a bit slower
+ * per pixel, an acceptable trade for a mode that's already paying 3x the
+ * pipeline cost. Called from activate_menu_row() the moment PALETTE cycles
+ * onto the RGB sentinel, so grab_process_draw()/take_photo() can assume
+ * these are non-NULL whenever rgb_mode_active() is true. */
+static bool rgb_mode_ensure_ready(void)
+{
+    if (s_cam_r) return true;
+    gbcam_t *r = calloc(1, sizeof(gbcam_t));
+    gbcam_t *g = calloc(1, sizeof(gbcam_t));
+    gbcam_t *b = calloc(1, sizeof(gbcam_t));
+    uint8_t *rgb = calloc(1, (size_t)GBCAM_W * GBCAM_H * 3);
+    if (!r || !g || !b || !rgb) {
+        free(r); free(g); free(b); free(rgb);
+        return false;
+    }
+    s_cam_r = r;
+    s_cam_g = g;
+    s_cam_b = b;
+    s_rgb_mode_rgb = rgb;
+    gbcam_settings_t gs;
+    gbcam_default_settings(&gs);
+    gs.max_samples = 4; /* matches s_cam's own init in app_init() */
+    gbcam_init(s_cam_r, &gs);
+    gbcam_init(s_cam_g, &gs);
+    gbcam_init(s_cam_b, &gs);
+    apply_settings_to(s_cam_r);
+    apply_settings_to(s_cam_g);
+    apply_settings_to(s_cam_b);
+    return true;
+}
+
+/* Combines s_cam_r/g/b's independently-dithered 0..3 shades into one
+ * GBCAM_W x GBCAM_H RGB888 image, GB Camera's 4 levels per channel instead
+ * of its usual 4-colour palette. gbcam's shade convention is 0 = white
+ * (brightest) .. 3 = black (darkest) - see gbcam.h - the opposite of a
+ * colour channel's own 0 = off .. 255 = full intensity, so each shade is
+ * inverted (3 - shade) before scaling up to 0/85/170/255. */
+static void rgb_mode_combine(void)
+{
+    for (int i = 0; i < GBCAM_PIXELS; i++) {
+        s_rgb_mode_rgb[i * 3 + 0] = (uint8_t)((3 - s_cam_r->shades[i]) * 85);
+        s_rgb_mode_rgb[i * 3 + 1] = (uint8_t)((3 - s_cam_g->shades[i]) * 85);
+        s_rgb_mode_rgb[i * 3 + 2] = (uint8_t)((3 - s_cam_b->shades[i]) * 85);
+    }
+}
+
 /* Live preview, both Dither Cam and Normal Cam: plain nearest-neighbour
  * sampling (dc_sample(), not dc_sample_smooth()) - cheap enough to stay
  * smooth at any Normal Cam size preset, up to 720p. Normal Cam's own
@@ -382,7 +495,7 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
 {
     esp_err_t err;
     if (s_set.cam_mode == CAM_MODE_GB) {
-        err = camera_grab(gb_frame_cb, s_cam);
+        err = rgb_mode_active() ? camera_grab(gb_frame_cb_rgb, NULL) : camera_grab(gb_frame_cb, s_cam);
     } else {
         bool normal = s_set.cam_mode == CAM_MODE_NORMAL;
         if (normal) {
@@ -400,7 +513,14 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
     if (out_t_grabbed) *out_t_grabbed = now_us();
 
     if (s_set.cam_mode == CAM_MODE_GB) {
-        gbcam_process_luma(s_cam);
+        if (rgb_mode_active()) {
+            gbcam_process_luma(s_cam_r);
+            gbcam_process_luma(s_cam_g);
+            gbcam_process_luma(s_cam_b);
+            rgb_mode_combine();
+        } else {
+            gbcam_process_luma(s_cam);
+        }
     } else if (s_set.cam_mode == CAM_MODE_DITHER) {
         float contrast, gamma;
         brightness_contrast_to_levels(&contrast, &gamma);
@@ -415,7 +535,14 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
     }
     if (out_t_processed) *out_t_processed = now_us();
 
-    if (s_set.cam_mode == CAM_MODE_GB) {
+    if (rgb_mode_active()) {
+        /* Plain camera-style preview, like Dither/Normal Cam - RGB mode's
+         * three independent channels don't fit display_begin_viewfinder()'s
+         * single-shade-plus-palette shape (no brightness/contrast bars, no
+         * frame overlay - frames are designed for GB Camera's indexed
+         * palettes, not a true-colour image). */
+        display_begin_camera(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false);
+    } else if (s_set.cam_mode == CAM_MODE_GB) {
         const uint8_t *shades = s_cam->shades;
         /* The frame only shows at 1:1 (see FRAME_PREVIEW_MS above): a brief
          * flash at 1:1 when you just changed it even in 2x mode, so you can
@@ -456,7 +583,13 @@ static void take_photo(void)
         if (grab_process_draw(i * 0.125f, NULL, NULL) != ESP_OK) break;
 
     int n;
-    if (s_set.cam_mode == CAM_MODE_GB) {
+    if (rgb_mode_active()) {
+        /* True colour, not GB Camera's palette-mapped 2bpp tiles - saved the
+         * same way as a Dither/Normal Cam photo (upscaled PNG), not
+         * storage_save()'s .BIN+palette pair, since there's no single shade
+         * per pixel to store that way. */
+        n = storage_ready() ? storage_save_dc(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false) : -1;
+    } else if (s_set.cam_mode == CAM_MODE_GB) {
         memcpy(s_still, s_cam->shades, GBCAM_PIXELS);
         int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
         n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame) : -1;
@@ -646,7 +779,10 @@ static void draw_menu(void)
         switch (s_menu_rows[i]) {
         case ROW_PALETTE:
             snprintf(labels[i], sizeof labels[i], "PALETTE");
-            truncate_value(values[i], gbcam_palette_name((gbcam_palette_t)s_set.palette));
+            /* One slot past the real palettes is the RGB sentinel - see
+             * rgb_mode_active(). */
+            if (s_set.palette == (uint8_t)gbcam_palette_count()) truncate_value(values[i], "RGB");
+            else truncate_value(values[i], gbcam_palette_name((gbcam_palette_t)s_set.palette));
             val = values[i];
             icons[i] = ICON_PALETTE;
             break;
@@ -759,7 +895,16 @@ static void activate_menu_row(void)
 {
     switch (s_menu_rows[s_menu_sel]) {
     case ROW_PALETTE:
-        s_set.palette = (uint8_t)((s_set.palette + 1) % gbcam_palette_count());
+        /* +1 slot for the RGB sentinel past the real palettes - see
+         * rgb_mode_active(). */
+        s_set.palette = (uint8_t)((s_set.palette + 1) % (gbcam_palette_count() + 1));
+        if (s_set.palette == (uint8_t)gbcam_palette_count() && !rgb_mode_ensure_ready()) {
+            /* Allocation failed (out of memory) - skip back to the first
+             * real palette rather than leaving palette pointed at a sentinel
+             * whose buffers don't exist. */
+            s_set.palette = 0;
+            osd_text("RGB UNAVAILABLE", "OUT OF MEMORY");
+        }
         apply_settings();
         break;
     case ROW_DITHER:
@@ -899,10 +1044,19 @@ static void rotate_viewfinder(int detents)
             apply_settings(); /* no OSD: the bars on screen show the change */
         } else if (s_adjust == ADJUST_2) {
             int v = (int)s_set.palette + detents;
-            int n = gbcam_palette_count();
-            s_set.palette = (uint8_t)(((v % n) + n) % n);
-            apply_settings();
-            osd_brief(gbcam_palette_name((gbcam_palette_t)s_set.palette));
+            /* +1 slot for the RGB sentinel past the real palettes - see
+             * rgb_mode_active() and ROW_PALETTE's own cycle in
+             * activate_menu_row(), which this must match. */
+            int n = gbcam_palette_count() + 1;
+            int new_palette = ((v % n) + n) % n;
+            if (new_palette == gbcam_palette_count() && !rgb_mode_ensure_ready()) {
+                osd_brief("RGB UNAVAILABLE");
+            } else {
+                s_set.palette = (uint8_t)new_palette;
+                apply_settings();
+                osd_brief(s_set.palette == (uint8_t)gbcam_palette_count() ? "RGB"
+                                                                          : gbcam_palette_name((gbcam_palette_t)s_set.palette));
+            }
         } else {
             int v = (int)s_set.frame + detents;
             int n = frames_total() + 1;
@@ -1439,7 +1593,9 @@ esp_err_t app_init(void)
     gbcam_set_extra_palettes(palettes_sd_gb_count(), palettes_sd_gb_rgb, palettes_sd_gb_name);
     dc_set_extra_palettes(palettes_sd_dc_count(), palettes_sd_dc_colors, palettes_sd_dc_name);
     dc_set_extra_lut_io(palettes_sd_load_lut, palettes_sd_save_lut); /* cache each one's nearest-colour LUT on the SD card, not RAM */
-    if (s_set.palette >= (uint8_t)gbcam_palette_count()) s_set.palette = GBCAM_PALETTE_DEFAULT;
+    /* > not >=: gbcam_palette_count() itself is the valid RGB sentinel (see
+     * rgb_mode_active()), one slot past the real palettes. */
+    if (s_set.palette > (uint8_t)gbcam_palette_count()) s_set.palette = GBCAM_PALETTE_DEFAULT;
     if (s_set.dc_palette >= (uint8_t)dc_palette_count()) s_set.dc_palette = DC_PALETTE_DEFAULT;
 
     err = usb_msc_init();

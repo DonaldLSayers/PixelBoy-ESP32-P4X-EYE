@@ -133,13 +133,16 @@ void gbcam_update_matrix(gbcam_t *cam)
 
 /* ---------------------------------------------------------------- downsample */
 
-static inline uint8_t pixel_luma(const uint8_t *row, int x, gbcam_pixfmt_t fmt)
+static inline uint8_t pixel_luma(const uint8_t *row, int x, gbcam_pixfmt_t fmt, gbcam_channel_t channel)
 {
     switch (fmt) {
     case GBCAM_FMT_GREY8:
-        return row[x];
+        return row[x]; /* no channels to pick from - always "luma" */
     case GBCAM_FMT_RGB888: {
         const uint8_t *p = row + x * 3;
+        if (channel == GBCAM_CHANNEL_RED) return p[0];
+        if (channel == GBCAM_CHANNEL_GREEN) return p[1];
+        if (channel == GBCAM_CHANNEL_BLUE) return p[2];
         return (uint8_t)((77 * p[0] + 150 * p[1] + 29 * p[2]) >> 8);
     }
     case GBCAM_FMT_RGB565_LE:
@@ -151,6 +154,9 @@ static inline uint8_t pixel_luma(const uint8_t *row, int x, gbcam_pixfmt_t fmt)
         r = (r << 3) | (r >> 2);
         g = (g << 2) | (g >> 4);
         b = (b << 3) | (b >> 2);
+        if (channel == GBCAM_CHANNEL_RED) return (uint8_t)r;
+        if (channel == GBCAM_CHANNEL_GREEN) return (uint8_t)g;
+        if (channel == GBCAM_CHANNEL_BLUE) return (uint8_t)b;
         return (uint8_t)((77 * r + 150 * g + 29 * b) >> 8);
     }
     }
@@ -256,7 +262,7 @@ void gbcam_downsample(gbcam_t *cam, const gbcam_frame_t *f)
             unsigned sum = 0;
             for (int j = 0; j < ny; j++)
                 for (int i = 0; i < nx[ox]; i++)
-                    sum += pixel_luma(rows[j], xs[ox][i], f->format);
+                    sum += pixel_luma(rows[j], xs[ox][i], f->format, f->channel);
             int dx = f->mirror_x ? (GBCAM_W - 1 - ox) : ox;
             out[dx] = (uint8_t)(sum / (unsigned)(ny * nx[ox]));
         }
