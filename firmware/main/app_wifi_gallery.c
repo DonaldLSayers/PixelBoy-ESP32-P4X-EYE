@@ -218,6 +218,35 @@ static void cp_power_down(void)
     gpio_set_level(s_cp_reset_pin.pin, 0);
 }
 
+/* One-step flash: main.c calls this unconditionally at every boot. Reading
+ * the c6fw partition is just the P4's own local flash - no C6/SDIO power-up
+ * needed for that part - so checking "is anything actually staged" is cheap
+ * enough to always do. Only powers the C6 up and runs the real check-and-
+ * flash (wifi_gallery_diag(), the slow/battery-costing part) if
+ * firmware/c6fw_image/c6_fw.bin was actually dropped in and reflashed;
+ * otherwise (the normal case - nothing staged, or a previous flash already
+ * erased it) this returns almost immediately and boot stays fast. */
+void wifi_gallery_check_c6_update(void)
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = C6FW_MOUNT,
+        .partition_label = C6FW_LABEL,
+        .max_files = 1,
+        .format_if_mount_failed = false,
+    };
+    if (esp_vfs_spiffs_register(&conf) != ESP_OK) return; /* nothing staged */
+
+    char path[64];
+    snprintf(path, sizeof path, "%s/c6_fw.bin", C6FW_MOUNT);
+    FILE *f = fopen(path, "rb");
+    bool staged = f != NULL;
+    if (f) fclose(f);
+    esp_vfs_spiffs_unregister(C6FW_LABEL);
+    if (!staged) return;
+
+    wifi_gallery_diag();
+}
+
 void wifi_gallery_diag(void)
 {
     if (!ensure_base_init()) return;
