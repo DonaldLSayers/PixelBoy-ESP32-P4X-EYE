@@ -79,13 +79,14 @@ bool wifi_gallery_active(void);
  * own datasheet) - nothing unusual there, all the board-specific info is
  * the P4-side GPIO list above.
  *
- * The C6's own network co-processor firmware was flashed directly over USB
- * (a UART adapter jumper-wired to the board's TP44-48 test points, not the
- * SDIO-OTA path flash_coprocessor() offers as a fallback), separately from
- * this project's own P4 build. tools/c6_coprocessor holds that build
- * (espressif/esp-hosted-mcu's mcu_hosted_sdio_sdmmc_combined example's "cp"
- * project) for reference/rebuilding, but the flashing itself happened
- * outside this repo.
+ * The C6's own network co-processor firmware was flashed via
+ * flash_coprocessor() below, over the SDIO link it already shares with the
+ * P4 (same approach as github.com/lboshuizen/crowpanel-p4-c6-sdio-ota).
+ * tools/c6_coprocessor holds that build (espressif/esp-hosted-mcu's
+ * mcu_hosted_sdio_sdmmc_combined example's "cp" project) - see the README's
+ * "Flashing the C6 co-processor" section for the actual steps (build it,
+ * drop the .bin on the SD card as c6_fw.bin, temporarily wire
+ * wifi_gallery_diag() back into main.c to push it over).
  *
  * Two real-hardware bugs found and fixed getting here, both worth knowing
  * about if this ever regresses:
