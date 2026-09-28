@@ -81,12 +81,15 @@ bool wifi_gallery_active(void);
  *
  * The C6's own network co-processor firmware was flashed via
  * flash_coprocessor() below, over the SDIO link it already shares with the
- * P4 (same approach as github.com/lboshuizen/crowpanel-p4-c6-sdio-ota).
- * tools/c6_coprocessor holds that build (espressif/esp-hosted-mcu's
- * mcu_hosted_sdio_sdmmc_combined example's "cp" project) - see the README's
- * "Flashing the C6 co-processor" section for the actual steps (build it,
- * drop the .bin on the SD card as c6_fw.bin, temporarily wire
- * wifi_gallery_diag() back into main.c to push it over).
+ * P4 (same approach as github.com/lboshuizen/crowpanel-p4-c6-sdio-ota),
+ * reading the image from its own dedicated c6fw flash partition (see
+ * partitions.csv) rather than the SD card - built from whatever's in
+ * firmware/c6fw_image/ and flashed automatically alongside the rest by
+ * idf.py flash. tools/c6_coprocessor holds that build (espressif/esp-hosted-
+ * mcu's mcu_hosted_sdio_sdmmc_combined example's "cp" project) - see the
+ * README's "Flashing the C6 co-processor" section for the actual steps
+ * (build it, drop it in firmware/c6fw_image/, temporarily wire
+ * wifi_gallery_diag() back into main.c to push it over SDIO).
  *
  * Two real-hardware bugs found and fixed getting here, both worth knowing
  * about if this ever regresses:

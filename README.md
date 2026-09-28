@@ -72,19 +72,27 @@ idf.py -p COM5 build flash monitor    # "Debug" USB-C port; check the COM number
 `Ctrl+]` leaves the monitor. If flashing can't connect: hold Boot, press Reset, release
 Boot, then flash again.
 
-This only flashes the P4 (bootloader, partition table, main app) - the onboard
-ESP32-C6 (WiFi Gallery's radio, see above) is a separate chip with its own
-flash and isn't touched by it. Its network co-processor firmware is flashed
-independently and stays put across every P4 reflash.
+This flashes the P4 (bootloader, partition table, main app, plus the `c6fw`
+staging partition below - all four are in one `flash_args`, one `idf.py
+flash`). The onboard ESP32-C6 chip itself (WiFi Gallery's radio, see above) is
+separate hardware with its own flash and isn't touched by this - its network
+co-processor firmware only actually moves over once `wifi_gallery_diag()`
+pushes it (next section), and stays put on the C6 across every ordinary P4
+reflash after that.
 
 ### Flashing the C6 co-processor
 
-Flashed *through* the P4's own USB port: build the C6's firmware, drop it on
-the SD card, then have the P4 push it over the SDIO bus it already shares
-with the C6, via ESP-Hosted's own OTA API (same idea as
+The C6 has no exposed UART/USB of its own - its only external link is the
+SDIO bus it already shares with the P4, so its firmware is flashed *through*
+the P4's own USB port instead, over that same SDIO link via ESP-Hosted's own
+OTA API (same idea as
 [lboshuizen/crowpanel-p4-c6-sdio-ota](https://github.com/lboshuizen/crowpanel-p4-c6-sdio-ota)).
 This project's version of that lives in `app_wifi_gallery.c`'s
 `flash_coprocessor()`/`wifi_gallery_diag()`.
+
+The C6 firmware image travels as its own dedicated flash partition (`c6fw` in
+`partitions.csv`, built from whatever's in `firmware/c6fw_image/` - see the
+top-level `CMakeLists.txt`) rather than a file dropped on the SD card by hand:
 
 1. Build the co-processor firmware:
    ```powershell
@@ -94,18 +102,21 @@ This project's version of that lives in `app_wifi_gallery.c`'s
    idf.py build
    ```
    Output: `tools\c6_coprocessor\build\eh_cp_transport_sdcard.bin`.
-2. Copy that file onto the SD card's root as `c6_fw.bin`.
-3. `wifi_gallery_diag()` (in `app_wifi_gallery.c`) is what actually pushes it -
-   it's not called from anywhere by default any more (it used to run on every
-   boot, which powered the C6 up whether WiFi Gallery was used or not - see
-   the power note above). Temporarily call it once from `main.c`'s
-   `app_main()`, then build/flash/monitor the P4 as usual (see above) and
-   watch the `wifi_gallery` log tag - it'll report the C6's firmware version,
-   flash it if it's blank/mismatched, and confirm WiFi comes up. Remove the
-   call again afterward.
-4. Delete `c6_fw.bin` from the SD card once it's confirmed working - nothing
-   reads it again once esp_wifi_init() succeeds, but no reason to leave a
-   multi-hundred-KB firmware image sitting there.
+2. Copy that file into `firmware\c6fw_image\c6_fw.bin` (create the folder if
+   it's not there - it's gitignored, so nothing this big ends up committed).
+3. Build/flash the P4 as usual (see above) - the `c6fw` partition gets
+   written automatically alongside everything else, no extra step.
+4. `wifi_gallery_diag()` (in `app_wifi_gallery.c`) is what actually pushes the
+   C6 firmware from that partition over SDIO - it's not called from anywhere
+   by default any more (it used to run on every boot, which powered the C6 up
+   whether WiFi Gallery was used or not - see the power note above).
+   Temporarily call it once from `main.c`'s `app_main()`, rebuild/reflash,
+   then watch the `wifi_gallery` log tag (or the on-screen status - it shows
+   "FLASHING C6...", then "C6 FLASHED OK" or "C6 WIFI FAILED"): it reports the
+   C6's firmware version, flashes it if it's blank/mismatched, and confirms
+   WiFi comes up. Remove the call again afterward. A successful flash also
+   erases the `c6fw` partition on the P4 side automatically - nothing to
+   clean up by hand.
 
 Only needed once, or if the co-processor firmware itself changes.
 
