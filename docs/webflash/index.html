@@ -85,6 +85,15 @@
     white-space: pre-wrap;
     margin: 16px 0;
   }
+  #black-screen-note {
+    display: none;
+    background: var(--accent);
+    color: var(--c-darkest);
+    border: 2px solid var(--fg);
+    padding: 14px 16px;
+    margin: 16px 0;
+    font-size: 1.05em;
+  }
   footer {
     margin-top: 40px;
     border-top: 2px solid var(--border);
@@ -103,6 +112,13 @@
 </p>
 
 <div class="note">
+  <strong>Hardware:</strong> an <a href="https://github.com/DonaldLSayers/PixelBoy-ESP32-P4X-EYE">ESP32-P4X-EYE</a>
+  board (Espressif ESP32-P4 main chip, MIPI-CSI camera, LCD) with an onboard
+  ESP32-C6-MINI-1U co-processor for WiFi, talking to the P4 over SDIO. This
+  page flashes both.
+</div>
+
+<div class="note">
   Needs <strong>Chrome or Edge</strong> (WebSerial isn't supported in Firefox
   or Safari). Plug the board into its <strong>"Debug"</strong> USB-C port
   first.
@@ -111,6 +127,12 @@
 <button id="flash-btn">Connect and flash</button>
 <div id="progress-wrap"><div id="progress-bar"></div></div>
 <div id="log"></div>
+<div id="black-screen-note">
+  <strong>Screen black?</strong> Press the Reset button on the front of the
+  camera. The flash itself already succeeded (including the C6's WiFi
+  firmware) - this is just the browser's reset signal occasionally not
+  fully waking the board back up on its own.
+</div>
 
 <p>
   On first boot the device detects the staged C6 firmware, flashes it over
@@ -123,13 +145,6 @@
   release Boot, then try again. If it still fails, use the
   <a href="https://github.com/DonaldLSayers/PixelBoy-ESP32-P4X-EYE/releases/tag/v1.0">esptool-based flash package</a>
   instead - it's the most reliable path.
-</p>
-<p>
-  <strong>If the screen stays black</strong> after the log says "Done!" -
-  press the board's physical Reset button once. The device itself is fine
-  (confirmed: the C6 firmware did get flashed) - this is the browser-based
-  reset signal occasionally not fully waking the board back up, not a
-  failed flash.
 </p>
 
 <footer>
@@ -150,6 +165,26 @@
   const logEl = document.getElementById("log");
   const progressWrap = document.getElementById("progress-wrap");
   const progressBar = document.getElementById("progress-bar");
+  const blackScreenNote = document.getElementById("black-screen-note");
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /* Our own reset instead of esploader.after("hard_reset"): that call held
+   * RTS (-> EN/reset) for only its own short default pulse, which on real
+   * hardware sometimes wasn't enough to fully cycle this board's native
+   * USB-Serial-JTAG reset circuit - the flash itself (including the C6's
+   * firmware) still completed fine, but the board came up on a black
+   * screen until someone pressed the physical Reset button. Holding EN low
+   * much longer (500ms vs the library's ~100ms) gives the reset circuit
+   * more margin to actually settle. */
+  async function hardResetWithDelay(transport, holdMs) {
+    await transport.setDTR(false);
+    await transport.setRTS(true);
+    await sleep(holdMs);
+    await transport.setRTS(false);
+    await sleep(50);
+    await transport.setDTR(false);
+  }
 
   function log(line) {
     logEl.style.display = "block";
@@ -211,13 +246,14 @@
         },
       });
 
-      log("Resetting device...");
-      await esploader.after("hard_reset");
+      log("Resetting device (holding reset ~500ms for a clean cycle)...");
+      await hardResetWithDelay(transport, 500);
       await transport.disconnect();
 
       progressBar.style.width = "100%";
       log("Done! The board is rebooting. Watch its screen for the C6 flash status.");
       btn.textContent = "Flashed - reconnect board to flash again";
+      blackScreenNote.style.display = "block";
     } catch (err) {
       log("ERROR: " + (err && err.message ? err.message : String(err)));
       log("Try: hold the board's Boot button, click the button again, release Boot once it starts connecting.");
