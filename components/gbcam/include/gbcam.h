@@ -67,6 +67,21 @@ typedef enum {
     GBCAM_EDGE_2D,
 } gbcam_edge_mode_t;
 
+/* Which value pixel_luma() reads out of a colour source pixel - the usual
+ * weighted-average luma, or one raw channel on its own (GREY8 has none to
+ * pick, so it's read as luma regardless). Lets gbcam_downsample() run its
+ * whole pipeline (exposure, edge enhancement, threshold dither) on a single
+ * colour channel instead of luma - run once per channel on the same frame
+ * and recombine the three results for a full-colour "GB Camera" look (see
+ * PIXELBOY's RGB palette), the digital equivalent of the real camera's
+ * red/green/blue physical-filter trick. */
+typedef enum {
+    GBCAM_CHANNEL_LUMA,
+    GBCAM_CHANNEL_RED,
+    GBCAM_CHANNEL_GREEN,
+    GBCAM_CHANNEL_BLUE,
+} gbcam_channel_t;
+
 typedef struct {
     const void *data;
     int width;
@@ -75,6 +90,7 @@ typedef struct {
     gbcam_pixfmt_t format;
     bool mirror_x;
     bool mirror_y;
+    gbcam_channel_t channel; /* default (0) = GBCAM_CHANNEL_LUMA, existing behaviour */
 } gbcam_frame_t;
 
 /* How the image is prepared before the (identical, ROM-accurate) threshold dither. */

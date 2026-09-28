@@ -54,6 +54,13 @@ Plugging the "USB" port (not "Debug") into a PC prompts on-device:
 
 Shutter cancels. Both webcam modes show up as a UVC webcam named "PIXELBOY".
 
+## WiFi Gallery
+
+Menu → WIFI GALLERY brings the onboard ESP32-C6 up as an access point (SSID
+"PixelBoy Gallery", password "PIXELBOY1") and serves a photo gallery at
+`http://192.168.4.1/` - browse/download from a phone, no cable. Shutter closes
+it and powers the C6 back down.
+
 ## Build and flash
 
 ```powershell
@@ -64,6 +71,13 @@ idf.py -p COM5 build flash monitor    # "Debug" USB-C port; check the COM number
 
 `Ctrl+]` leaves the monitor. If flashing can't connect: hold Boot, press Reset, release
 Boot, then flash again.
+
+This only flashes the P4 (bootloader, partition table, main app) - the onboard
+ESP32-C6 (WiFi Gallery's radio, see above) is a separate chip with its own
+flash and isn't touched by it. Its network co-processor firmware is flashed
+independently (over its own USB/UART, not through this project's build) and
+stays put across every P4 reflash. `tools/c6_coprocessor` holds that firmware's
+source for reference/rebuilding, but flashing it isn't part of this command.
 
 ## PC tools
 
