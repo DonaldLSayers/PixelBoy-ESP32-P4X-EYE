@@ -21,13 +21,11 @@
  * deletes the current photo.
  */
 #include "app.h"
-#include "app_wifi_gallery.h" /* TEMP: wifi-gallery branch diagnostic, see wifi_gallery_diag() */
 
 void app_main(void)
 {
     if (app_init() != ESP_OK)
         return;
-    wifi_gallery_diag(); /* TEMP: checks whether the C6 is reachable/already flashed */
     for (;;)
         app_step();
 }
