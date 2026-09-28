@@ -1,5 +1,0 @@
-dependencies:
-  espressif/esp_hosted:
-    version: '*'
-  idf:
-    version: '>=5.5'

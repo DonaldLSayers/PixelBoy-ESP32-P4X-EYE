@@ -1,3 +1,0 @@
-# Test rename to a config name without CONFIG_ prefix
-
-CONFIG_OLD CONFIG_NEW

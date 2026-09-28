@@ -1,3 +1,0 @@
-config ORSOURCED
-    bool "orsourced config"
-    default y
