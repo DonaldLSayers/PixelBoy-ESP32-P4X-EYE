@@ -59,3 +59,18 @@ CONFIG_TINYUSB_MSC_ENABLED=y
 # mode then showed a different problem instead: it couldn't service real
 # MSC traffic fast enough, so Windows dropped the connection ~3s after
 # enumerating (see app_usb.c's usb_msc_tick()).
+
+# WiFi Gallery (see app_wifi_gallery.h) - the P4 has no radio of its own,
+# so WiFi goes through the board's onboard ESP32-C6-MINI-1U over SDIO via
+# ESP-Hosted. ESP32P4_EYE_C6_BOARD selects this exact board's SDIO pin
+# preset (confirmed against the real schematic - CMD=27, CLK=28, D0-D3=
+# 29-32, reset/EN=9 - see app_wifi_gallery.h's comment). The real SD card
+# already uses SDMMC slot 0 (app_usb.c's SDMMC_HOST_SLOT_0), so this must
+# be slot 1 - the two share the controller but not the slot.
+CONFIG_ESP_HOSTED=y
+CONFIG_ESP_HOSTED_HOST=y
+CONFIG_ESP_HOSTED_HOST_TYPE_MCU=y
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
+CONFIG_ESP32P4_EYE_C6_BOARD=y
+CONFIG_ESP_HOSTED_HOST_TRANSPORT_BUS_SDIO=y
+CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
