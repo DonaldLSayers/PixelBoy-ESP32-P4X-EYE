@@ -547,48 +547,53 @@ void display_menu(const char *title, const char *const *labels, const char *cons
     }
 }
 
-void display_osd(const char *line1, const char *line2)
+void display_osd(const char *line1, const char *line2, const char *line3)
 {
-    /* One line: a shorter box, centred where the two-line box would be. */
+    /* One/two lines: a shorter box, centred where the three-line box would
+     * be - see the (OSD_H - h) / 2 term below, which cancels OSD_Y's own
+     * two-line-sized offset back out to whatever h actually is. */
+    bool three = line3 && line3[0];
     bool two = line2 && line2[0];
+    int lines = three ? 3 : two ? 2 : 1;
     int max_w = DISP_W - 8 - 24;
 
-    /* One scale for the whole box, not picked per line - a two-line message
-     * with one long line and one short one should still show both lines at
-     * matching size, not a mismatched mix. Drops from OSD_SCALE to 1 only
-     * if something here wouldn't otherwise fit on screen (display_text()
+    /* One scale for the whole box, not picked per line - a multi-line
+     * message with one long line and shorter ones should still show every
+     * line at matching size, not a mismatched mix. Drops from OSD_SCALE to 1
+     * only if something here wouldn't otherwise fit on screen (display_text()
      * doesn't clip). */
     int scale = OSD_SCALE;
     int w1 = line1 ? display_text_width(line1, scale) : 0;
     int w2 = two ? display_text_width(line2, scale) : 0;
-    if ((w1 > max_w || w2 > max_w) && scale > 1) {
+    int w3 = three ? display_text_width(line3, scale) : 0;
+    if ((w1 > max_w || w2 > max_w || w3 > max_w) && scale > 1) {
         scale = 1;
         w1 = line1 ? display_text_width(line1, scale) : 0;
         w2 = two ? display_text_width(line2, scale) : 0;
+        w3 = three ? display_text_width(line3, scale) : 0;
     }
 
     /* Box width fits whichever line is wider - fixed-width boxes clipped
      * palette names near the 12-char label() truncation length in gen_
      * palettes.py (e.g. "RESURRECT 64"). Clamped to the screen so a
      * hypothetically longer string still can't run off it. */
-    int w = (w1 > w2 ? w1 : w2) + 24;
+    int w12 = w1 > w2 ? w1 : w2;
+    int w = (w12 > w3 ? w12 : w3) + 24;
     if (w < OSD_W_MIN) w = OSD_W_MIN;
     if (w > DISP_W - 8) w = DISP_W - 8;
     int x = (DISP_W - w) / 2;
-    int h = two ? OSD_H : 32, y = OSD_Y + (OSD_H - h) / 2;
+    int h = lines * 32, y = OSD_Y + (OSD_H - h) / 2;
     display_rect(x - 2, y - 2, w + 4, h + 4, 255, 255, 255);
     display_rect(x, y, w, h, 0, 0, 0);
 
-    /* Vertically centred: one line in the whole box, or each line centred
-     * in its own half of it - not a fixed offset tuned for one glyph size. */
+    /* Vertically centred: one line in the whole box, or each line centred in
+     * its own 1/lines share of it - not a fixed offset tuned for one glyph
+     * size. */
     int glyph_h = FONT_H * scale;
-    if (!two) {
-        if (line1) display_text(DISP_W / 2 - w1 / 2, y + (h - glyph_h) / 2, scale, line1, 255, 255, 255);
-    } else {
-        int half = h / 2;
-        if (line1) display_text(DISP_W / 2 - w1 / 2, y + (half - glyph_h) / 2, scale, line1, 255, 255, 255);
-        display_text(DISP_W / 2 - w2 / 2, y + half + (half - glyph_h) / 2, scale, line2, 255, 255, 255);
-    }
+    int share = h / lines;
+    if (line1) display_text(DISP_W / 2 - w1 / 2, y + (share - glyph_h) / 2, scale, line1, 255, 255, 255);
+    if (two) display_text(DISP_W / 2 - w2 / 2, y + share + (share - glyph_h) / 2, scale, line2, 255, 255, 255);
+    if (three) display_text(DISP_W / 2 - w3 / 2, y + 2 * share + (share - glyph_h) / 2, scale, line3, 255, 255, 255);
 }
 
 void display_shutter(float progress)

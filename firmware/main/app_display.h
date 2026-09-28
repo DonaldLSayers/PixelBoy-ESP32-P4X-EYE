@@ -101,8 +101,9 @@ void display_grid_cell(int index, const uint8_t *rgb888, int w, int h, bool sele
 void display_menu(const char *title, const char *const *labels, const char *const *values,
                   const icon_id_t *icons, int count, int selected);
 
-/* On-screen message box centred on the image, up to two lines. */
-void display_osd(const char *line1, const char *line2);
+/* On-screen message box centred on the image, up to three lines - line3 NULL
+ * (or "") for the usual one/two-line case. */
+void display_osd(const char *line1, const char *line2, const char *line3);
 
 /* Shutter-closing-then-opening animation over whatever's already drawn this
  * frame (the frozen just-taken photo) - two black curtains sliding in from

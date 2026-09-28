@@ -47,6 +47,7 @@
 #include "app_settings.h"
 #include "app_storage.h"
 #include "app_usb.h"
+#include "app_wifi_gallery.h"
 #include "platform.h"
 
 static const char *TAG = "gbcam";
@@ -57,7 +58,7 @@ static const char *TAG = "gbcam";
 #define DELETE_CONFIRM_MS 3000
 #define FRAME_PREVIEW_MS 2000
 
-typedef enum { SCREEN_VIEWFINDER, SCREEN_MENU, SCREEN_GALLERY, SCREEN_USB } screen_t;
+typedef enum { SCREEN_VIEWFINDER, SCREEN_MENU, SCREEN_GALLERY, SCREEN_USB, SCREEN_WIFI } screen_t;
 typedef enum { ADJUST_0, ADJUST_1, ADJUST_2, ADJUST_3, ADJUST_4, ADJUST_5 } adjust_t;
 
 typedef struct {
@@ -124,14 +125,14 @@ typedef enum {
     ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
     ROW_SLEEP,
-    ROW_GALLERY, ROW_EXIT
+    ROW_GALLERY, ROW_WIFI, ROW_EXIT
 } menu_row_t;
 
 /* Auto-sleep timeout choices (see SLEEP_OPTIONS_COUNT in app_settings.h,
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[9];
+static menu_row_t s_menu_rows[10];
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -153,9 +154,12 @@ static void osd_brief(const char *l1)
 
 static void draw_osd(void)
 {
-    if (usb_msc_prompt_pending()) { display_osd("USB: MENU=DRIVE", "BTM=MIRROR MODE=GB"); return; }
+    /* Top-to-bottom button order (MENU/MODE/CAMMODE - see app_input.h), not
+     * action order - matches the physical layout so the prompt reads the
+     * same order the buttons sit in, one per line. */
+    if (usb_msc_prompt_pending()) { display_osd("MENU=DRIVE", "MODE=GB", "BTM=MIRROR"); return; }
     if (now_us() > s_osd.until_us) return;
-    display_osd(s_osd.line1, s_osd.line2);
+    display_osd(s_osd.line1, s_osd.line2, NULL);
 }
 
 static void apply_settings(void)
@@ -549,6 +553,40 @@ static void usb_screen_frame(void)
     display_end_frame();
 }
 
+/* ------------------------------------------------------------- WiFi Gallery */
+
+static void handle_wifi_input(const input_event_t *ev)
+{
+    /* INPUT_PRESS, not INPUT_CLICK - ROW_WIFI is activated by the menu's own
+     * Shutter *press* (see activate_menu_row()), so that same press's later
+     * release would otherwise arrive here as a CLICK on the very next
+     * app_step() and instantly exit the screen it just opened. Matches
+     * ROW_GALLERY's leave_gallery() trigger, which has the same "activated
+     * by a Shutter press" shape and dodges it the same way. */
+    if (ev->type == INPUT_PRESS && ev->button == BTN_SHUTTER) {
+        wifi_gallery_stop();
+        camera_resume();
+        s_screen = SCREEN_VIEWFINDER;
+    }
+}
+
+static void wifi_screen_frame(void)
+{
+    display_begin_blank(0, 0, 0);
+    char l2[40], l3[40];
+    snprintf(l2, sizeof l2, "SSID %s", WIFI_GALLERY_SSID);
+    snprintf(l3, sizeof l3, "PASS %s", WIFI_GALLERY_PASS);
+    const char *l1 = "WIFI GALLERY";
+    const char *l4 = "http://192.168.4.1";
+    const char *l5 = "SHUTTER TO EXIT";
+    display_text(DISP_W / 2 - display_text_width(l1, 2) / 2, 70, 2, l1, 255, 255, 255);
+    display_text(DISP_W / 2 - display_text_width(l2, 1) / 2, 100, 1, l2, 200, 200, 200);
+    display_text(DISP_W / 2 - display_text_width(l3, 1) / 2, 115, 1, l3, 200, 200, 200);
+    display_text(DISP_W / 2 - display_text_width(l4, 1) / 2, 135, 1, l4, 200, 200, 200);
+    display_text(DISP_W / 2 - display_text_width(l5, 1) / 2, 160, 1, l5, 200, 200, 200);
+    display_end_frame();
+}
+
 /* --------------------------------------------------------------------- menu */
 
 /* Menu row values (a longer frame/palette/pack name in particular) can run
@@ -583,6 +621,7 @@ static void build_menu(void)
     }
     s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
+    s_menu_rows[s_menu_count++] = ROW_WIFI;
     s_menu_rows[s_menu_count++] = ROW_EXIT;
     if (s_menu_sel >= s_menu_count) s_menu_sel = s_menu_count - 1;
 }
@@ -599,9 +638,9 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
-    char labels[9][12], values[9][12];
-    const char *label_ptrs[9], *value_ptrs[9];
-    icon_id_t icons[9];
+    char labels[10][13], values[10][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
+    const char *label_ptrs[10], *value_ptrs[10];
+    icon_id_t icons[10];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
@@ -698,6 +737,10 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "GALLERY");
             icons[i] = ICON_GALLERY;
             break;
+        case ROW_WIFI:
+            snprintf(labels[i], sizeof labels[i], "WIFI GALLERY");
+            icons[i] = ICON_WIFI;
+            break;
         case ROW_EXIT:
             snprintf(labels[i], sizeof labels[i], "EXIT");
             icons[i] = ICON_EXIT;
@@ -779,6 +822,17 @@ static void activate_menu_row(void)
         s_screen = SCREEN_VIEWFINDER; /* enter_gallery() switches it again if it succeeds */
         enter_gallery();
         return;
+    case ROW_WIFI:
+        /* camera_pause() already happened entering the menu - stays paused
+         * behind this screen, same as ROW_GALLERY, until handle_wifi_input()
+         * exits back to the viewfinder. */
+        wifi_gallery_start();
+        if (wifi_gallery_active()) {
+            s_screen = SCREEN_WIFI;
+            return;
+        }
+        osd_text("WIFI FAILED", NULL);
+        break;
     case ROW_EXIT:
         break;
     }
@@ -1502,6 +1556,7 @@ void app_step(void)
         if (s_screen == SCREEN_USB) handle_usb_input(&ev);
         else if (s_screen == SCREEN_VIEWFINDER) handle_viewfinder_input(&ev);
         else if (s_screen == SCREEN_MENU) handle_menu_input(&ev);
+        else if (s_screen == SCREEN_WIFI) handle_wifi_input(&ev);
         else handle_gallery_input(&ev);
     }
 
@@ -1509,13 +1564,15 @@ void app_step(void)
      * usb_msc_active(), given app_step()'s own check above) - cutting power
      * mid-transfer would be a bad surprise, not just an inconvenience. Same
      * for mirror mode - sleeping would blank the very screen it's streaming.
-     * sleep_min of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
+     * Same for the WiFi gallery - a phone could be mid-download. sleep_min
+     * of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
     int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
-    if (sleep_min != 0 && s_screen != SCREEN_USB && !usb_webcam_active() &&
+    if (sleep_min != 0 && s_screen != SCREEN_USB && s_screen != SCREEN_WIFI && !usb_webcam_active() &&
         now_us() - s_last_input_us > (int64_t)sleep_min * 60 * 1000000LL) enter_sleep();
 
     if (s_screen == SCREEN_GALLERY) gallery_frame();
     else if (s_screen == SCREEN_USB) usb_screen_frame();
+    else if (s_screen == SCREEN_WIFI) wifi_screen_frame();
     else viewfinder_frame(); /* also drives SCREEN_MENU, so the feed keeps live behind it */
     usb_webcam_feed_screen(); /* after the draw above, whichever screen it was - see its own comment */
     usb_webcam_feed_gb();     /* only one of these two actually sends anything - see s_webcam_mirror */

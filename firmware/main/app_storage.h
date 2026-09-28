@@ -69,3 +69,14 @@ esp_err_t storage_load_thumb(int number, bool is_dc, uint8_t **out_rgb, int *out
 void storage_free_dc(uint8_t *rgb);
 
 esp_err_t storage_delete(int number, bool is_dc);
+
+/* Path accessors for serving files directly over HTTP (WiFi Gallery) - no
+ * decode/re-encode needed, the file's already a viewable image. Both return
+ * false (path left untouched) if nothing's found.
+ *   storage_photo_path()  the full photo, for download.
+ *   storage_thumb_path()  the small THUMB/ grid copy (generated first if not
+ *                         already cached, same fallback storage_load_thumb()
+ *                         uses) - the full photos turned out too slow to
+ *                         load a whole grid of them over the AP's WiFi link. */
+bool storage_photo_path(int number, bool is_dc, char *out, size_t len, const char **out_content_type);
+bool storage_thumb_path(int number, bool is_dc, char *out, size_t len);
