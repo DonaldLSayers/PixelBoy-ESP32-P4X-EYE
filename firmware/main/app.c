@@ -141,14 +141,14 @@ typedef enum {
     ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
     ROW_SLEEP,
-    ROW_GALLERY, ROW_GBEMU, ROW_WIFI, ROW_EXIT
+    ROW_GALLERY, ROW_WIFI, ROW_EXIT
 } menu_row_t;
 
 /* Auto-sleep timeout choices (see SLEEP_OPTIONS_COUNT in app_settings.h,
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[11];
+static menu_row_t s_menu_rows[10];
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -769,7 +769,6 @@ static void build_menu(void)
     }
     s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
-    s_menu_rows[s_menu_count++] = ROW_GBEMU;
     s_menu_rows[s_menu_count++] = ROW_WIFI;
     s_menu_rows[s_menu_count++] = ROW_EXIT;
     if (s_menu_sel >= s_menu_count) s_menu_sel = s_menu_count - 1;
@@ -787,6 +786,8 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
+    /* Sized to match s_menu_rows[] - GB Camera's 6 mode rows + 4 shared rows
+     * (Sleep/Gallery/WiFi/Exit) = 10, the largest any mode builds. */
     char labels[10][13], values[10][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
     const char *label_ptrs[10], *value_ptrs[10];
     icon_id_t icons[10];
@@ -891,13 +892,6 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "GALLERY");
             icons[i] = ICON_GALLERY;
             break;
-        case ROW_GBEMU:
-            /* No dedicated icon yet - reusing GALLERY's (browsing content is
-             * the closest existing one) rather than adding a new asset for
-             * this still-early feature. */
-            snprintf(labels[i], sizeof labels[i], "GB EMULATOR");
-            icons[i] = ICON_GALLERY;
-            break;
         case ROW_WIFI:
             snprintf(labels[i], sizeof labels[i], "WIFI GALLERY");
             icons[i] = ICON_WIFI;
@@ -991,19 +985,6 @@ static void activate_menu_row(void)
     case ROW_GALLERY:
         s_screen = SCREEN_VIEWFINDER; /* enter_gallery() switches it again if it succeeds */
         enter_gallery();
-        return;
-    case ROW_GBEMU:
-        /* gbemu_run() is a self-contained blocking excursion (its own ROM/
-         * save pickers and play loop, own display drawing) rather than a
-         * screen in this state machine. camera_pause() already happened
-         * entering the menu - undo that first: a GB Camera ROM's own live
-         * viewfinder needs the ISP actually streaming (camera_grab() while
-         * paused just returns nothing, seen as the emulator's picture going
-         * black). */
-        camera_resume();
-        gbemu_run();
-        camera_resume();
-        s_screen = SCREEN_VIEWFINDER;
         return;
     case ROW_WIFI:
         /* camera_pause() already happened entering the menu - stays paused

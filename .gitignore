@@ -16,6 +16,13 @@ tools/**/*.new.lib
 tools/**/*.new.pdb
 samples/
 
+# GB emulator ROMs/save files (e.g. gb-photo's photo.gbc/photo.sav) and their
+# export-tracking markers - copyrighted/personal cartridge data, not source.
+*.gb
+*.gbc
+*.sav
+*.sav.exported
+
 # PIXEL CAM is its own separate git repo (github.com/DonaldLSayers/PixelBoy) -
 # not part of this one.
 PIXEL CAM/

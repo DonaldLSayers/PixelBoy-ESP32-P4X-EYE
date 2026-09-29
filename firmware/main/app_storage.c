@@ -378,6 +378,30 @@ esp_err_t storage_load(int number, uint8_t *shades)
     return ESP_OK;
 }
 
+/* Byte-for-byte match against every existing GB/EMU photo's .BIN (skips DC,
+ * which has no .BIN) - used by app_gbemu.c's "pull new photos" to tell a
+ * genuinely new capture apart from one it's already saved. Content-based
+ * rather than tracking which .sav slot a photo came from: a GB Camera-alike
+ * ROM's save file reuses physical slot numbers once a roll is cleared (gb-
+ * photo confirmed on real hardware), so the same slot index can hold a
+ * different photo from one run to the next - comparing actual tile bytes is
+ * the only check that's still correct after that. */
+bool storage_has_duplicate_gb_tiles(const uint8_t tiles[GBCAM_TILES_SIZE])
+{
+    static uint8_t existing[GBCAM_TILES_SIZE];
+    char path[300];
+    for (int i = 0; i < s_count; i++) {
+        if (s_photos[i].is_dc) continue;
+        bin_path_for(path, sizeof path, s_photos[i].prefix, s_photos[i].number);
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        size_t n = fread(existing, 1, sizeof existing, f);
+        fclose(f);
+        if (n == sizeof existing && memcmp(existing, tiles, sizeof existing) == 0) return true;
+    }
+    return false;
+}
+
 int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg)
 {
     int number = next_number();

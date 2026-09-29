@@ -317,12 +317,56 @@ static void scan_dir(const char *dir, int depth)
     closedir(d);
 }
 
+/* Forward declarations - pull_new_photos_from_sav()/sav_path_for() are
+ * defined further down (photo pulling needs GBCAM_SAV_* from this section,
+ * sav_path_for() needs rom_entry_t from this one), but pick_rom()'s "PULL
+ * NEW PHOTOS" row needs both. */
+static int pull_new_photos_from_sav(const char *sav_path);
+static void sav_path_for(const char *rom_path, int slot, char *out, size_t out_len);
+static bool file_exists(const char *path);
+/* Save slots are numbered 1..GBCAM_MAX_SAVE_SLOTS, contiguous - see
+ * count_save_slots() further down for the "list always ends one past the
+ * last real save" logic this same constant serves there. */
+#define GBCAM_MAX_SAVE_SLOTS 30
+
+/* Runs pull_new_photos_from_sav() against every save slot of every ROM under
+ * /ROMS (not just whichever one's currently selected) - one button pulls
+ * everything, no need to dig into each ROM individually. Shows a short
+ * result screen, waits for any input, then returns to the list. */
+static void pull_all_new_photos(void)
+{
+    display_begin_blank(0, 0, 0);
+    display_text(DISP_W / 2 - display_text_width("PULLING PHOTOS...", 1) / 2, 110, 1, "PULLING PHOTOS...", 255, 255, 255);
+    display_end_frame();
+
+    int pulled = 0;
+    for (int r = 0; r < s_rom_count; r++) {
+        for (int slot = 1; slot <= GBCAM_MAX_SAVE_SLOTS; slot++) {
+            char sav_path[300];
+            sav_path_for(s_roms[r].path, slot, sav_path, sizeof sav_path);
+            if (!file_exists(sav_path)) break; /* slots are contiguous, see count_save_slots() */
+            int n = pull_new_photos_from_sav(sav_path);
+            if (n > 0) pulled += n;
+        }
+    }
+
+    display_begin_blank(0, 0, 0);
+    char msg[32];
+    snprintf(msg, sizeof msg, pulled == 1 ? "PULLED 1 PHOTO" : "PULLED %d PHOTOS", pulled);
+    display_text(DISP_W / 2 - display_text_width(msg, 1) / 2, 110, 1, msg, pulled ? 150 : 200, 255, pulled ? 150 : 200);
+    display_end_frame();
+    plat_sleep_ms(1200);
+}
+
 /* Simple scrollable text list - encoder scrolls, Shutter picks, Menu click
- * cancels. Returns the chosen path in out_path, or false if cancelled. */
+ * cancels. Row 0 is always the synthetic "PULL NEW PHOTOS" action (see
+ * pull_all_new_photos()); real ROMs start at row 1. Returns the chosen path
+ * in out_path, or false if cancelled. */
 static bool pick_rom(char *out_path, size_t out_len)
 {
     const int row_h = 18, scale = 1;
     const int rows_visible = (DISP_H - 40) / row_h;
+    const int row_count = s_rom_count + 1; /* +1 for the PULL NEW PHOTOS row */
     int sel = 0, scroll = 0;
 
     for (;;) {
@@ -333,13 +377,14 @@ static bool pick_rom(char *out_path, size_t out_len)
         if (sel < scroll) scroll = sel;
         if (sel >= scroll + rows_visible) scroll = sel - rows_visible + 1;
 
-        for (int i = 0; i < rows_visible && scroll + i < s_rom_count; i++) {
+        for (int i = 0; i < rows_visible && scroll + i < row_count; i++) {
             int idx = scroll + i;
             int y = 38 + i * row_h;
             bool is_sel = idx == sel;
             if (is_sel) display_rect(4, y - 2, DISP_W - 8, row_h - 2, 255, 255, 255);
             uint8_t c = is_sel ? 0 : 255;
-            display_text(8, y, scale, s_roms[idx].name, c, c, c);
+            const char *name = idx == 0 ? "PULL NEW PHOTOS" : s_roms[idx - 1].name;
+            display_text(8, y, scale, name, c, c, c);
         }
         display_end_frame();
 
@@ -348,9 +393,13 @@ static bool pick_rom(char *out_path, size_t out_len)
             if (ev.type == INPUT_ROTATE) {
                 sel += ev.value;
                 if (sel < 0) sel = 0;
-                if (sel > s_rom_count - 1) sel = s_rom_count - 1;
+                if (sel > row_count - 1) sel = row_count - 1;
             } else if (ev.type == INPUT_PRESS && ev.button == BTN_SHUTTER) {
-                snprintf(out_path, out_len, "%s", s_roms[sel].path);
+                if (sel == 0) {
+                    pull_all_new_photos();
+                    break; /* redraw the list instead of returning */
+                }
+                snprintf(out_path, out_len, "%s", s_roms[sel - 1].path);
                 return true;
             } else if (ev.type == INPUT_CLICK && ev.button == BTN_MENU) {
                 return false;
@@ -414,12 +463,17 @@ static bool file_exists(const char *path)
 #define GBCAM_SAV_SLOT_BASE 0x2000
 #define GBCAM_SAV_STATE_VECTOR_OFFSET 0x11B2
 
-/* Tracks which physical slot numbers (0-29) have already been exported for
- * a given .sav, in a tiny sidecar file next to it ("<sav>.exported", one
- * byte per slot) - runs automatically every time a ROM exits (see run_rom())
- * without ever duplicating a photo already pulled out on a previous
- * session. */
-static int export_photos_from_sav(const char *sav_path)
+/* User-triggered from the ROM list's "PULL NEW PHOTOS" row (see pick_rom()),
+ * not automatic on ROM exit - a physical slot number isn't a stable photo
+ * identity: gb-photo's own "Clear camera roll" frees every slot for reuse,
+ * so the next photo taken can land right back in a slot this .sav had
+ * already given up on a previous run. A slot-number marker (this function's
+ * previous approach) would then skip it as "already exported" even though
+ * it's a completely different photo - confirmed on real hardware. Comparing
+ * actual tile bytes against every existing GB/EMU photo's .BIN
+ * (storage_has_duplicate_gb_tiles()) is slower but correct regardless of
+ * slot reuse, and cheap enough run on demand (tens of small file reads). */
+static int pull_new_photos_from_sav(const char *sav_path)
 {
     FILE *f = fopen(sav_path, "rb");
     if (!f) return -1;
@@ -436,48 +490,24 @@ static int export_photos_from_sav(const char *sav_path)
         return -1;
     }
 
-    char marker_path[320];
-    snprintf(marker_path, sizeof marker_path, "%s.exported", sav_path);
-    uint8_t already[GBCAM_SAV_SLOT_COUNT] = {0};
-    FILE *mf = fopen(marker_path, "rb");
-    if (mf) {
-        fread(already, 1, sizeof already, mf);
-        fclose(mf);
-    }
-
     static uint8_t shades[GBCAM_PIXELS];
     const uint8_t *state_vector = buf + GBCAM_SAV_STATE_VECTOR_OFFSET;
-    int exported = 0;
-    bool marker_changed = false;
+    int pulled = 0;
     for (int i = 0; i < GBCAM_SAV_SLOT_COUNT; i++) {
         uint8_t slot_num = state_vector[i];
         if (slot_num >= GBCAM_SAV_SLOT_COUNT) continue; /* 0xFF (or garbage) = blank */
-        if (already[slot_num]) continue;
         uint8_t *slot = buf + GBCAM_SAV_SLOT_BASE + (size_t)slot_num * GBCAM_SAV_SLOT_SIZE;
+        if (storage_has_duplicate_gb_tiles(slot)) continue; /* already pulled this exact photo */
         gbcam_tiles_to_shades(slot, shades);
-        if (storage_save(shades, GBCAM_PALETTE_DEFAULT, -1, "EMU") >= 0) {
-            exported++;
-            already[slot_num] = 1;
-            marker_changed = true;
-        }
+        if (storage_save(shades, GBCAM_PALETTE_DEFAULT, -1, "EMU") >= 0) pulled++;
     }
     free(buf);
-
-    if (marker_changed) {
-        FILE *mf = fopen(marker_path, "wb");
-        if (mf) {
-            fwrite(already, 1, sizeof already, mf);
-            fclose(mf);
-        }
-    }
-    return exported;
+    return pulled;
 }
 
 /* Every slot up to and including the first non-existent one, so the list
  * always ends with exactly one "NEW SAVE" row past however many saves
  * already exist - no fixed cap, just keeps growing as you make more. */
-#define GBCAM_MAX_SAVE_SLOTS 30
-
 static int count_save_slots(const char *rom_path)
 {
     int n = 1;
@@ -628,7 +658,7 @@ static void run_rom(const char *rom_path, const char *sav_path)
     bool encoder_is_updown = false;
     int64_t osd_until_us = 0; /* non-zero while the axis-toggle message should show, see display_osd() below */
     int64_t left_until_us = 0, right_until_us = 0, up_until_us = 0, down_until_us = 0;
-    int64_t b_until_us = 0, select_until_us = 0;
+    int64_t a_until_us = 0, b_until_us = 0, select_until_us = 0;
     /* gb_run_frame() has no real-time pacing of its own - it just advances
      * emulated game time by exactly one Game Boy frame per call, as fast as
      * it's called. Real hardware runs at DMG_CLOCK_FREQ/SCREEN_REFRESH_
@@ -648,16 +678,23 @@ static void run_rom(const char *rom_path, const char *sav_path)
             } else if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_CAMMODE) {
                 encoder_is_updown = !encoder_is_updown;
                 osd_until_us = plat_now_us() + 600000;
-            } else if (ev.type == INPUT_PRESS && ev.button == BTN_SHUTTER) {
-                gb.direct.joypad &= ~JOYPAD_A;
             } else if (ev.type == INPUT_CLICK && ev.button == BTN_SHUTTER) {
-                gb.direct.joypad |= JOYPAD_A;
+                /* Momentary tap, not press/release-tracked like Mode below -
+                 * a real physical tap easily spans several emulated frames
+                 * (~16.7ms each) at human reaction speed, and a ROM that
+                 * transitions screens on Shutter (gb-photo's "take photo" ->
+                 * "Save?" prompt) can see A still logically held on the very
+                 * next frame and treat it as an instant confirm, skipping the
+                 * prompt entirely - confirmed on real hardware. Same fix as
+                 * B/SELECT's bounded pulse below. */
+                gb.direct.joypad &= ~JOYPAD_A;
+                a_until_us = plat_now_us() + 150000;
             } else if (ev.type == INPUT_PRESS && ev.button == BTN_MODE) {
                 gb.direct.joypad &= ~JOYPAD_START;
             } else if (ev.type == INPUT_CLICK && ev.button == BTN_MODE) {
                 gb.direct.joypad |= JOYPAD_START;
             } else if (ev.type == INPUT_CLICK && ev.button == BTN_MENU) {
-                /* Momentary tap, not press/release-tracked like Shutter/Mode -
+                /* Momentary tap, not press/release-tracked like Mode below -
                  * Menu's long-press is already reserved for exit, so a true
                  * held-B would never actually reach the game past 600ms. */
                 gb.direct.joypad &= ~JOYPAD_B;
@@ -701,6 +738,7 @@ static void run_rom(const char *rom_path, const char *sav_path)
          * timer, which cleared it before gb_run_frame() ever ran and meant the
          * game never actually saw SELECT pressed at all - confirmed on real
          * hardware. */
+        if (a_until_us && tap_now > a_until_us) { gb.direct.joypad |= JOYPAD_A; a_until_us = 0; }
         if (b_until_us && tap_now > b_until_us) { gb.direct.joypad |= JOYPAD_B; b_until_us = 0; }
         if (select_until_us && tap_now > select_until_us) { gb.direct.joypad |= JOYPAD_SELECT; select_until_us = 0; }
 
@@ -751,11 +789,6 @@ static void run_rom(const char *rom_path, const char *sav_path)
         } else {
             ESP_LOGE(TAG, "couldn't write save %s", sav_path);
         }
-    }
-
-    if (gb.mbc == 6) {
-        int n = export_photos_from_sav(sav_path);
-        if (n > 0) ESP_LOGW(TAG, "auto-exported %d new photo(s) from %s", n, sav_path);
     }
 
     free(ctx.rom);

@@ -43,6 +43,10 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
 
 esp_err_t storage_load(int number, uint8_t *shades);
 
+/* True if some existing GB/EMU photo's raw tiles already match byte-for-byte
+ * - see app_storage.c for why this has to be content-based, not slot-based. */
+bool storage_has_duplicate_gb_tiles(const uint8_t tiles[GBCAM_TILES_SIZE]);
+
 /* Decodes a saved GBnnnnn.PNG back to RGB888 for the gallery's framed 1:1
  * view - the palette and frame (if any) actually baked in at save time,
  * unlike storage_load()'s palette-free .BIN tiles. *out_rgb must be freed
