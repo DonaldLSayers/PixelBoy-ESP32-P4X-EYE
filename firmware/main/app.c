@@ -678,9 +678,13 @@ static int gb_aeb_capture(void)
     s_cam->settings.auto_exposure = false;
 
     uint8_t *shade_sum = malloc(GBCAM_PIXELS); /* max count*3 stays well under 255 for any sane level */
-    static uint8_t progress_rgb[GBCAM_PIXELS * 3];
+    /* ~42KB - too big for internal RAM (chronically ~51KB free at boot), so
+     * PSRAM instead of a plain static array, same fix as two prior
+     * internal-RAM-exhaustion bugs elsewhere in this codebase. */
+    static uint8_t *progress_rgb;
+    if (!progress_rgb) progress_rgb = heap_caps_malloc(GBCAM_PIXELS * 3, MALLOC_CAP_SPIRAM);
     int saved = 0;
-    if (shade_sum) {
+    if (shade_sum && progress_rgb) {
         memset(shade_sum, 0, GBCAM_PIXELS);
         for (int i = 0; i < count; i++) {
             s_cam->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_gain, gb_aeb_ev_for_index(i, count));

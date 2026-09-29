@@ -145,6 +145,13 @@ typedef struct {
     float lv_contrast, lv_gamma; /* PIXEL CAM style: levels in use (smoothed auto result) */
     bool lv_valid;
     int8_t lv_target;            /* PIXEL CAM style: auto-levels candidate being followed, -1 none */
+    /* PIXEL CAM style: final shade-mapping curve, cached per-instance since
+     * each gbcam_t (e.g. Trichrome's separate R/G/B instances) converges to
+     * its own independent (contrast, gamma) - a single shared cache gets
+     * invalidated and rebuilt by every other instance's call, defeating the
+     * whole point of caching it. */
+    uint8_t lv_lut[256];
+    float lv_lut_c, lv_lut_g;
     bool acc_valid;
     uint16_t luma_acc[GBCAM_PIXELS]; /* denoise accumulator, luma in Q8 */
 

@@ -797,9 +797,14 @@ static void run_rom(const char *rom_path, const char *sav_path)
     if (gb.cart_ram) {
         FILE *wf = fopen(sav_path, "wb");
         if (wf) {
-            fwrite(ctx.cart_ram, 1, CART_RAM_MAX, wf);
+            size_t written = fwrite(ctx.cart_ram, 1, CART_RAM_MAX, wf);
             fclose(wf);
-            ESP_LOGW(TAG, "wrote save %s", sav_path);
+            if (written == CART_RAM_MAX) {
+                ESP_LOGW(TAG, "wrote save %s", sav_path);
+            } else {
+                ESP_LOGE(TAG, "short write saving %s (%u/%u bytes) - save may be corrupt",
+                         sav_path, (unsigned)written, (unsigned)CART_RAM_MAX);
+            }
         } else {
             ESP_LOGE(TAG, "couldn't write save %s", sav_path);
         }
