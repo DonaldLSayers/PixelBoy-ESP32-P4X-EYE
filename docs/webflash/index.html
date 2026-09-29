@@ -94,6 +94,20 @@
     margin: 16px 0;
     font-size: 1.05em;
   }
+  #version-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  #version-select {
+    font-family: "VT323", monospace;
+    font-size: 20px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 2px solid var(--border);
+    padding: 4px 8px;
+  }
   footer {
     margin-top: 40px;
     border-top: 2px solid var(--border);
@@ -122,6 +136,11 @@
   Needs <strong>Chrome or Edge</strong> (WebSerial isn't supported in Firefox
   or Safari). Plug the board into its <strong>"Debug"</strong> USB-C port
   first.
+</div>
+
+<div class="note" id="version-row">
+  <span>Version:</span>
+  <select id="version-select"><option value="">loading releases...</option></select>
 </div>
 
 <button id="flash-btn">Connect and flash</button>
@@ -154,18 +173,65 @@
 <script type="module">
   import { ESPLoader, Transport } from "https://unpkg.com/esptool-js@0.7.0/bundle.js";
 
-  const FILES = [
-    { path: "bootloader.bin", address: 0x2000 },
-    { path: "partition-table.bin", address: 0x8000 },
-    { path: "gbcam_p4eye.bin", address: 0x10000 },
-    { path: "c6fw.bin", address: 0x420000 },
+  /* address/filename pairs are fixed across every release so far - only
+   * where the bytes come from changes based on which version is selected. */
+  const FILE_DEFS = [
+    { name: "bootloader.bin", address: 0x2000 },
+    { name: "partition-table.bin", address: 0x8000 },
+    { name: "gbcam_p4eye.bin", address: 0x10000 },
+    { name: "c6fw.bin", address: 0x420000 },
   ];
+  const REPO = "DonaldLSayers/PixelBoy-ESP32-P4X-EYE";
 
   const btn = document.getElementById("flash-btn");
   const logEl = document.getElementById("log");
   const progressWrap = document.getElementById("progress-wrap");
   const progressBar = document.getElementById("progress-bar");
   const blackScreenNote = document.getElementById("black-screen-note");
+  const versionSelect = document.getElementById("version-select");
+
+  /* The very first (newest) release fetched below is "latest" - for that
+   * one specifically, files are read from right next to this page (fast,
+   * no extra request, and stays correct even before a GitHub release's own
+   * assets exist yet) rather than a GitHub release download URL. Every
+   * other, older version fetches straight from that release's own assets -
+   * GitHub serves those with CORS enabled, so this works directly from
+   * browser JS with no server of our own involved. */
+  let latestTag = null;
+
+  async function loadVersions() {
+    try {
+      const resp = await fetch(`https://api.github.com/repos/${REPO}/releases`);
+      if (!resp.ok) throw new Error(`releases API: ${resp.status}`);
+      const releases = await resp.json();
+      if (!Array.isArray(releases) || releases.length === 0) throw new Error("no releases returned");
+      latestTag = releases[0].tag_name;
+      versionSelect.innerHTML = "";
+      for (const r of releases) {
+        const opt = document.createElement("option");
+        opt.value = r.tag_name;
+        opt.textContent = r.tag_name === latestTag ? `${r.tag_name} (latest)` : r.tag_name;
+        versionSelect.appendChild(opt);
+      }
+      versionSelect.value = latestTag;
+    } catch (err) {
+      /* Best-effort - the page still works, just always flashing whatever
+       * is bundled alongside it instead of offering older versions too. */
+      versionSelect.innerHTML = '<option value="">latest (bundled with this page)</option>';
+    }
+  }
+  loadVersions();
+
+  function filesForSelectedVersion() {
+    const tag = versionSelect.value;
+    if (!tag || tag === latestTag) {
+      return FILE_DEFS.map((f) => ({ ...f, path: f.name }));
+    }
+    return FILE_DEFS.map((f) => ({
+      ...f,
+      path: `https://github.com/${REPO}/releases/download/${tag}/${f.name}`,
+    }));
+  }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -222,9 +288,10 @@
       const chip = await esploader.main("usb_reset");
       log(`Connected: ${chip}`);
 
-      log("Downloading firmware images...");
+      const files = filesForSelectedVersion();
+      log(`Downloading firmware images (${versionSelect.value || "latest"})...`);
       const fileArray = [];
-      for (const f of FILES) {
+      for (const f of files) {
         const resp = await fetch(f.path);
         if (!resp.ok) throw new Error(`couldn't fetch ${f.path}: ${resp.status}`);
         const data = new Uint8Array(await resp.arrayBuffer());
@@ -242,7 +309,7 @@
         reportProgress: (fileIndex, written, total) => {
           const pct = Math.round((written / total) * 100);
           progressBar.style.width = pct + "%";
-          if (written === total) log(`${FILES[fileIndex].path}: done`);
+          if (written === total) log(`${files[fileIndex].name}: done`);
         },
       });
 
