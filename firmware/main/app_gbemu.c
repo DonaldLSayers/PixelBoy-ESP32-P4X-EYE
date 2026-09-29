@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -119,6 +120,9 @@ static bool s_cam_gain_seeded;
  * memcpy of whatever it most recently finished - same idea as the real
  * sensor running independently of the CPU polling it. */
 static TaskHandle_t s_cam_task_handle;
+#define GBCAM_TASK_STACK_BYTES 32768
+static StaticTask_t s_cam_task_tcb;    /* small (~200B), stays internal RAM - fine */
+static StackType_t *s_cam_task_stack;  /* the actual 32KB, forced into PSRAM below */
 static volatile bool s_cam_task_should_run;
 static volatile bool s_cam_task_stopped;
 
@@ -221,17 +225,27 @@ static void gbcam_emu_init(void)
      * Pinned to the second core (main/GB emulation defaults to core 0) so
      * the ~30ms of real work it does every cycle actually runs in parallel
      * with the game instead of still competing for the same core's time
-     * slices, which is what made things feel slower rather than smoother. */
-    BaseType_t ok = xTaskCreatePinnedToCore(gbcam_emu_task, "gbcam_emu", 32768, NULL,
-                                            tskIDLE_PRIORITY + 2, &s_cam_task_handle, 1);
-    /* Silently failing here (its return was never checked before) looks
-     * exactly like a black/white screen with no other symptom - the image
-     * area just never gets touched past its zeroed default. Confirmed on
-     * real hardware: internal (not PSRAM) free heap had dropped enough that
-     * this 32KB stack no longer fit. */
-    if (ok != pdPASS) {
-        ESP_LOGE(TAG, "gbcam_emu task creation failed (%d) - camera image will stay blank", (int)ok);
-        s_cam_task_handle = NULL;
+     * slices, which is what made things feel slower rather than smoother.
+     *
+     * This has now silently starved twice (v1.2.1, then again after new
+     * unrelated features grew internal RAM use further) because a plain
+     * xTaskCreatePinnedToCore() stack always comes out of internal RAM, and
+     * internal free heap on this board keeps shrinking as features get
+     * added - there's 22MB+ PSRAM sitting idle instead. Static task creation
+     * with the stack buffer explicitly heap_caps_malloc'd from PSRAM makes
+     * this task immune to that class of regression permanently; only the
+     * tiny TCB itself (a few hundred bytes) still needs internal RAM. */
+    if (!s_cam_task_stack) {
+        s_cam_task_stack = heap_caps_malloc(GBCAM_TASK_STACK_BYTES, MALLOC_CAP_SPIRAM);
+    }
+    s_cam_task_handle = NULL;
+    if (s_cam_task_stack) {
+        s_cam_task_handle = xTaskCreateStaticPinnedToCore(
+            gbcam_emu_task, "gbcam_emu", GBCAM_TASK_STACK_BYTES, NULL,
+            tskIDLE_PRIORITY + 2, s_cam_task_stack, &s_cam_task_tcb, 1);
+    }
+    if (!s_cam_task_handle) {
+        ESP_LOGE(TAG, "gbcam_emu task creation failed - camera image will stay blank");
     }
 }
 
