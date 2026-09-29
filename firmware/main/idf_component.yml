@@ -7,7 +7,10 @@ dependencies:
   # USB Mass Storage (browse SD card photos from a PC over the "USB" port -
   # separate from the "Debug" port used for flashing/console, since ESP32-P4
   # has independent PHYs for USB-OTG and USB-Serial-JTAG).
-  espressif/esp_tinyusb: ">=1.7.0"
+  # Pinned below 2.0.0: that release restructured tinyusb_config_t (descriptor
+  # setup moved into nested structs), breaking app_usb_video_desc.c's
+  # hand-built UVC descriptor, which targets the pre-2.0 flat-field API.
+  espressif/esp_tinyusb: ">=1.7.0,<2.0.0"
   # WiFi Gallery: the P4 has no radio of its own - this talks to the
   # board's onboard ESP32-C6-MINI-1U over SDIO (its own firmware, flashed
   # separately - see app_wifi_gallery.h) so the P4 can host a small photo
