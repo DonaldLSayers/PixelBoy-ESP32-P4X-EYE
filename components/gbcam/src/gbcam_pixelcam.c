@@ -17,6 +17,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
+
 #include "gbcam.h"
 
 static const float search_contrast[] = {0.8f, 1.0f, 1.15f, 1.3f, 1.5f, 1.7f, 2.0f};
@@ -68,11 +70,13 @@ static float entropy_of(const unsigned counts[4])
 /* The 35 candidate curves never change: build them once. build_lut() uses
  * double-precision pow() (to match the Python exactly), which the ESP32-P4 can
  * only do in software, so rebuilding them every frame would cost tens of ms. */
-static uint8_t candidate_luts[N_CONTRAST * N_GAMMA][256];
+static uint8_t (*candidate_luts)[256]; /* ~9KB - PSRAM instead of internal static, same reasoning as elsewhere */
 static bool candidate_luts_built;
 
 static void build_candidate_luts(void)
 {
+    if (!candidate_luts) candidate_luts = heap_caps_malloc(N_CONTRAST * N_GAMMA * 256, MALLOC_CAP_SPIRAM);
+    if (!candidate_luts) return;
     for (size_t ci = 0; ci < N_CONTRAST; ci++)
         for (size_t gi = 0; gi < N_GAMMA; gi++)
             build_lut(candidate_luts[ci * N_GAMMA + gi], search_contrast[ci], search_gamma[gi]);
@@ -86,6 +90,10 @@ static int search_levels(const gbcam_t *cam, float scores[N_CONTRAST * N_GAMMA])
     if (!candidate_luts_built) build_candidate_luts();
     float best_score = -1.0f;
     int best = 0;
+    if (!candidate_luts) {
+        memset(scores, 0, N_CONTRAST * N_GAMMA * sizeof scores[0]);
+        return best;
+    }
     for (size_t ci = 0; ci < N_CONTRAST; ci++) {
         for (size_t gi = 0; gi < N_GAMMA; gi++) {
             const uint8_t *lut = candidate_luts[ci * N_GAMMA + gi];
@@ -157,14 +165,16 @@ void gbcam_process_pixelcam(gbcam_t *cam)
     if (gamma > 4.0f) gamma = 4.0f;
 
     /* Final curve: rebuilt only when contrast/gamma actually change (once
-     * auto-levels has converged and snapped, that's never). */
-    static uint8_t lut[256];
-    static float lut_c = -1.0f, lut_g = -1.0f;
-    if (c != lut_c || gamma != lut_g) {
-        build_lut(lut, c, gamma);
-        lut_c = c;
-        lut_g = gamma;
+     * auto-levels has converged and snapped, that's never). Cached per-cam
+     * (not a shared static) - Trichrome runs three gbcam_t instances back to
+     * back, each converging to its own (contrast, gamma), which thrashed a
+     * single shared cache every frame indefinitely. */
+    if (c != cam->lv_lut_c || gamma != cam->lv_lut_g) {
+        build_lut(cam->lv_lut, c, gamma);
+        cam->lv_lut_c = c;
+        cam->lv_lut_g = gamma;
     }
+    const uint8_t *lut = cam->lv_lut;
     const uint8_t *m = cam->matrix;
     for (int y = 0; y < GBCAM_H; y++) {
         const uint8_t *row = cam->luma + y * GBCAM_W;

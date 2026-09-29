@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_partition.h"
 #include "esp_vfs_fat.h"
 #include "wear_levelling.h"
@@ -30,11 +31,21 @@ static bool s_was_mounted; /* edge-detect for tud_mounted() */
 /* -------------------------------------------------------------- webcam (UVC) */
 
 static bool s_webcam_active;
-static uint8_t s_webcam_jpeg[WEBCAM_JPEG_MAX_BYTES];
+/* ~126KB (WEBCAM_FRAME_W*H) - too big for internal RAM (chronically ~51KB
+ * free at boot on this board), so this comes from PSRAM instead of a plain
+ * static array, same fix as the two prior internal-RAM-exhaustion bugs. */
+static uint8_t *s_webcam_jpeg;
 static bool s_webcam_tx_busy;
 
 void usb_webcam_accept(void)
 {
+    if (!s_webcam_jpeg) {
+        s_webcam_jpeg = heap_caps_malloc(WEBCAM_JPEG_MAX_BYTES, MALLOC_CAP_SPIRAM);
+        if (!s_webcam_jpeg) {
+            PLOGI(TAG, "webcam mode failed - out of PSRAM for JPEG buffer");
+            return;
+        }
+    }
     s_prompt = false;
     s_webcam_active = true;
     PLOGI(TAG, "webcam mode - streaming the GB Camera view over USB");
@@ -62,7 +73,7 @@ void usb_webcam_feed(const uint8_t *rgb888)
 {
     if (!s_webcam_active || !tud_video_n_streaming(0, 0) || s_webcam_tx_busy) return;
 
-    jpeg_write_ctx_t ctx = { .buf = s_webcam_jpeg, .len = 0, .cap = sizeof s_webcam_jpeg };
+    jpeg_write_ctx_t ctx = { .buf = s_webcam_jpeg, .len = 0, .cap = WEBCAM_JPEG_MAX_BYTES };
     if (!stbi_write_jpg_to_func(jpeg_write_cb, &ctx, WEBCAM_FRAME_W, WEBCAM_FRAME_H, 3, rgb888, 80)) return;
 
     s_webcam_tx_busy = true;

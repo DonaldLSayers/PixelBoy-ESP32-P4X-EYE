@@ -110,6 +110,8 @@ void gbcam_init(gbcam_t *cam, const gbcam_settings_t *s)
     cam->gain_q8 = GAIN_START;
     cam->tier = 2;
     cam->lv_target = -1;
+    cam->lv_lut_c = -1.0f;
+    cam->lv_lut_g = -1.0f;
     cam->high_light = true;
     gbcam_update_matrix(cam);
 }
