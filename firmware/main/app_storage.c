@@ -18,6 +18,7 @@ static const char *TAG = "storage";
 typedef struct {
     int number;
     bool is_dc;
+    char prefix[4]; /* "GB" (real camera) or "EMU" (pulled from a GB emulator .sav) - unused/blank for is_dc */
 } photo_t;
 
 static bool s_ready;
@@ -39,14 +40,28 @@ static void path_for(char *out, size_t len, const char *prefix, int number, cons
     snprintf(out, len, "%s/%s%05d.%s", s_dir, prefix, number, ext);
 }
 
-/* GBnnnnn.BIN specifically lives in its own subfolder - it's the raw
- * palette-free tile data (re-render material, not something to look at
- * directly), unlike every other saved file (the .PNG/.JPG previews,
+/* GBnnnnn.BIN/EMUnnnnn.BIN specifically live in their own subfolder - it's
+ * the raw palette-free tile data (re-render material, not something to look
+ * at directly), unlike every other saved file (the .PNG/.JPG previews,
  * Dither/Normal Cam's own saves) which are all actual viewable photos side
  * by side in one folder. */
-static void bin_path_for(char *out, size_t len, int number)
+static void bin_path_for(char *out, size_t len, const char *prefix, int number)
 {
-    snprintf(out, len, "%s/GB%05d.BIN", s_bin_dir, number);
+    snprintf(out, len, "%s/%s%05d.BIN", s_bin_dir, prefix, number);
+}
+
+/* Looks up which prefix ("GB" or "EMU") a given non-DC photo number was
+ * saved under - every read-side path below needs this instead of assuming
+ * "GB", now that GB Camera's own captures and photos pulled out of an
+ * emulator .sav (see app_gbemu.c) share one numbering sequence but use
+ * different prefixes on disk. Falls back to "GB" if the number isn't in
+ * s_photos yet (shouldn't happen for anything the gallery can reach). */
+static const char *gb_prefix_for(int number)
+{
+    for (int i = 0; i < s_count; i++)
+        if (s_photos[i].number == number && !s_photos[i].is_dc)
+            return s_photos[i].prefix;
+    return "GB";
 }
 
 /* thumbnails are always .PNG regardless of the source's own format (Normal
@@ -123,11 +138,25 @@ static void write_thumbnail(const char *prefix, int number, const uint8_t *rgb88
     free(thumb);
 }
 
+/* GB Camera's own captures are GBnnnnn, photos pulled out of a GB emulator
+ * .sav (see app_gbemu.c's export_photos_from_sav()) are EMUnnnnn - both
+ * live in the same BIN/ subfolder and share one numbering sequence, just
+ * distinguished by this prefix. Matches name against prefix case-
+ * insensitively, then parses the number/extension after it. */
+static bool parse_numbered_file(const char *name, const char *prefix, int *out_n, char *ext)
+{
+    size_t plen = strlen(prefix);
+    if (strncasecmp(name, prefix, plen) != 0) return false;
+    return sscanf(name + plen, "%5d.%3s", out_n, ext) == 2;
+}
+
 /* One-time migration for a card that already has GBnnnnn.BIN files sitting
  * directly in s_dir from before this split existed - moves each into
  * s_bin_dir so scan() (which now only looks for them there) still finds
  * every existing photo instead of losing them. Best-effort: a rename
- * failure just leaves that one where it was, to be retried next boot. */
+ * failure just leaves that one where it was, to be retried next boot.
+ * Only ever "GB" - EMU-prefixed exports are new enough to never have
+ * predated this split. */
 static void migrate_bin_files(void)
 {
     DIR *d = opendir(s_dir);
@@ -136,12 +165,52 @@ static void migrate_bin_files(void)
     while ((e = readdir(d)) != NULL) {
         int n;
         char ext[4] = {0};
-        if (sscanf(e->d_name, "%*1[Gg]%*1[Bb]%5d.%3s", &n, ext) != 2) continue;
+        if (!parse_numbered_file(e->d_name, "GB", &n, ext)) continue;
         if (!(ext[0] == 'B' || ext[0] == 'b')) continue;
         char old_path[300], new_path[300];
         snprintf(old_path, sizeof old_path, "%s/%s", s_dir, e->d_name);
-        bin_path_for(new_path, sizeof new_path, n);
+        bin_path_for(new_path, sizeof new_path, "GB", n);
         if (rename(old_path, new_path) != 0) PLOGW(TAG, "couldn't migrate %s to BIN/", e->d_name);
+    }
+    closedir(d);
+}
+
+/* GBnnnnn/EMUnnnnn's full-size .PNG (in s_dir) is the actual viewable photo -
+ * .BIN (in s_bin_dir) is just re-render material and THUMB/ just a cache,
+ * but scan() below only checks .BIN to decide a numbered photo "exists".
+ * If the .PNG gets deleted directly (e.g. over USB mass storage, not
+ * through this app), that leaves a gallery entry with nothing to actually
+ * show - so before counting anything, drop any .BIN/thumbnail whose .PNG is
+ * gone, the same self-healing spirit as migrate_bin_files() above. */
+static void prune_orphaned_bins(void)
+{
+    DIR *d = opendir(s_bin_dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        int n;
+        char ext[4] = {0};
+        const char *prefix = "GB";
+        if (!parse_numbered_file(e->d_name, "GB", &n, ext)) {
+            prefix = "EMU";
+            if (!parse_numbered_file(e->d_name, "EMU", &n, ext)) continue;
+        }
+        if (!(ext[0] == 'B' || ext[0] == 'b')) continue;
+
+        char png_path[300];
+        path_for(png_path, sizeof png_path, prefix, n, "PNG");
+        FILE *check = fopen(png_path, "rb");
+        if (check) {
+            fclose(check);
+            continue; /* PNG still there - a real photo, keep it */
+        }
+
+        char bin_path[300], thumb_path[300];
+        bin_path_for(bin_path, sizeof bin_path, prefix, n);
+        thumb_path_for(thumb_path, sizeof thumb_path, prefix, n);
+        remove(bin_path);
+        remove(thumb_path);
+        PLOGI(TAG, "pruned orphaned %s%05d (PNG missing)", prefix, n);
     }
     closedir(d);
 }
@@ -169,19 +238,27 @@ static void scan(void)
         closedir(d);
     }
 
-    /* GB Camera photos are counted by their .BIN, which now lives in its own
-     * subfolder (see bin_path_for()) - a separate pass, not a second pattern
-     * in the loop above. */
+    /* GB Camera / emulator-exported photos are counted by their .BIN, which
+     * now lives in its own subfolder (see bin_path_for()) - a separate pass,
+     * not a second pattern in the loop above. */
     d = opendir(s_bin_dir);
     if (d) {
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
             int n;
             char ext[4] = {0};
-            if (sscanf(e->d_name, "%*1[Gg]%*1[Bb]%5d.%3s", &n, ext) != 2) continue;
+            const char *prefix = "GB";
+            if (!parse_numbered_file(e->d_name, "GB", &n, ext)) {
+                prefix = "EMU";
+                if (!parse_numbered_file(e->d_name, "EMU", &n, ext)) continue;
+            }
             if (!(ext[0] == 'B' || ext[0] == 'b')) continue;
             if (n >= s_next_number) s_next_number = n + 1;
-            if (s_count < MAX_PHOTOS) s_photos[s_count++] = (photo_t){.number = n, .is_dc = false};
+            if (s_count < MAX_PHOTOS) {
+                photo_t *p = &s_photos[s_count++];
+                *p = (photo_t){.number = n, .is_dc = false};
+                snprintf(p->prefix, sizeof p->prefix, "%s", prefix);
+            }
         }
         closedir(d);
     }
@@ -206,6 +283,7 @@ esp_err_t storage_init(void)
     snprintf(s_thumb_dir, sizeof s_thumb_dir, "%s/THUMB", s_dir);
     plat_mkdir(s_thumb_dir);
     migrate_bin_files();
+    prune_orphaned_bins();
     scan();
     s_ready = true;
     PLOGI(TAG, "%d photos in %s", s_count, s_dir);
@@ -227,7 +305,7 @@ static int next_number(void)
     return s_next_number;
 }
 
-int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame)
+int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, const char *prefix)
 {
     int number = next_number();
     if (number < 0) return -1;
@@ -237,7 +315,7 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame)
      * just the plain photo, regardless of frame (see app_storage.h). */
     static uint8_t tiles[GBCAM_TILES_SIZE];
     gbcam_shades_to_tiles(shades, tiles);
-    bin_path_for(path, sizeof path, number);
+    bin_path_for(path, sizeof path, prefix, number);
     FILE *f = fopen(path, "wb");
     if (!f) {
         PLOGE(TAG, "cannot write %s", path);
@@ -271,16 +349,18 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame)
         }
     }
     if (rgb) {
-        path_for(path, sizeof path, "GB", number, "PNG");
+        path_for(path, sizeof path, prefix, number, "PNG");
         if (!stbi_write_png(path, w, h, 3, rgb, w * 3))
             PLOGW(TAG, "PNG write failed: %s", path);
-        write_thumbnail("GB", number, rgb, w, h);
+        write_thumbnail(prefix, number, rgb, w, h);
         free(rgb);
     }
 
-    s_photos[s_count++] = (photo_t){.number = number, .is_dc = false};
+    photo_t *p = &s_photos[s_count++];
+    *p = (photo_t){.number = number, .is_dc = false};
+    snprintf(p->prefix, sizeof p->prefix, "%s", prefix);
     s_next_number = number + 1;
-    PLOGI(TAG, "saved photo GB%05d", number);
+    PLOGI(TAG, "saved photo %s%05d", prefix, number);
     return number;
 }
 
@@ -288,7 +368,7 @@ esp_err_t storage_load(int number, uint8_t *shades)
 {
     char path[300];
     static uint8_t tiles[GBCAM_TILES_SIZE];
-    bin_path_for(path, sizeof path, number);
+    bin_path_for(path, sizeof path, gb_prefix_for(number), number);
     FILE *f = fopen(path, "rb");
     if (!f) return ESP_ERR_NOT_FOUND;
     size_t n = fread(tiles, 1, sizeof tiles, f);
@@ -368,7 +448,7 @@ esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h)
 esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *out_h)
 {
     char path[300];
-    path_for(path, sizeof path, "GB", number, "PNG");
+    path_for(path, sizeof path, gb_prefix_for(number), number, "PNG");
     int w, h, comp;
     uint8_t *rgb = stbi_load(path, &w, &h, &comp, 3);
     if (!rgb) return ESP_ERR_NOT_FOUND;
@@ -389,7 +469,7 @@ void storage_free_dc(uint8_t *rgb) { stbi_image_free(rgb); }
 esp_err_t storage_load_thumb(int number, bool is_dc, uint8_t **out_rgb, int *out_w, int *out_h)
 {
     char path[300];
-    thumb_path_for(path, sizeof path, is_dc ? "DC" : "GB", number);
+    thumb_path_for(path, sizeof path, is_dc ? "DC" : gb_prefix_for(number), number);
     int comp;
     uint8_t *rgb = stbi_load(path, out_w, out_h, &comp, 3);
     if (rgb) {
@@ -434,7 +514,7 @@ bool storage_photo_path(int number, bool is_dc, char *out, size_t len, const cha
         }
         return false;
     }
-    path_for(out, len, "GB", number, "PNG");
+    path_for(out, len, gb_prefix_for(number), number, "PNG");
     if ((f = fopen(out, "rb")) == NULL) return false;
     fclose(f);
     *out_content_type = "image/png";
@@ -443,7 +523,7 @@ bool storage_photo_path(int number, bool is_dc, char *out, size_t len, const cha
 
 bool storage_thumb_path(int number, bool is_dc, char *out, size_t len)
 {
-    thumb_path_for(out, len, is_dc ? "DC" : "GB", number);
+    thumb_path_for(out, len, is_dc ? "DC" : gb_prefix_for(number), number);
     FILE *f = fopen(out, "rb");
     if (f) {
         fclose(f);
@@ -462,7 +542,8 @@ bool storage_thumb_path(int number, bool is_dc, char *out, size_t len)
 esp_err_t storage_delete(int number, bool is_dc)
 {
     char path[300];
-    thumb_path_for(path, sizeof path, is_dc ? "DC" : "GB", number);
+    const char *prefix = is_dc ? "DC" : gb_prefix_for(number);
+    thumb_path_for(path, sizeof path, prefix, number);
     remove(path); /* not every old photo has a thumbnail yet - a failed remove() here is expected, not logged */
     if (is_dc) {
         /* Only one of these exists for a given number (Dither Cam's .PNG or
@@ -475,9 +556,9 @@ esp_err_t storage_delete(int number, bool is_dc)
         bool jpg_ok = remove(path) == 0;
         if (!png_ok && !jpg_ok) PLOGW(TAG, "delete failed: DC%05d - neither .PNG nor .JPG removed", number);
     } else {
-        bin_path_for(path, sizeof path, number);
+        bin_path_for(path, sizeof path, prefix, number);
         if (remove(path) != 0) PLOGW(TAG, "delete failed: %s", path);
-        path_for(path, sizeof path, "GB", number, "PNG");
+        path_for(path, sizeof path, prefix, number, "PNG");
         if (remove(path) != 0) PLOGW(TAG, "delete failed: %s", path);
     }
     for (int i = 0; i < s_count; i++) {

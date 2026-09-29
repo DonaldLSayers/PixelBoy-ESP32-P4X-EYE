@@ -5,6 +5,7 @@
 | gb-photo (Toxa): contrast tables, dither patterns, auto-exposure logic | `components/gbcam/src/gbcam_dither.c`, `gbcam.c` | MIT, Copyright (c) 2022 Toxa. Full text in `gbcam_dither.c` | https://github.com/untoxa/gb-photo |
 | stb_image, stb_image_write (Sean Barrett) | `components/stb/include` | Public domain / MIT (dual, see headers) | https://github.com/nothings/stb |
 | "Early GameBoy" font (LDEJRuff, via FontStruct) | `assets/fonts/early-gameboy.ttf`, converted to `firmware/main/font8x8.h` by `tools/gen_font.py` | CC BY-SA 3.0, Copyright LDEJRuff 2012 - **share-alike**: derivatives (including this font8x8.h conversion) must stay under the same license. See http://creativecommons.org/licenses/by-sa/3.0/ | not on GitHub - FontStruct (fontstruct.com) |
+| Peanut-GB (Mahyar Koshkouei) - Game Boy emulator core, vendored as a single header | `components/peanut_gb/include/peanut_gb.h` | MIT, Copyright (c) 2018-2023 Mahyar Koshkouei. Full text at the top of the file. Also includes small marked portions from the SameBoy project (MIT, Copyright (c) 2015-2019 Lior Halphon) - see the file's own header comment | https://github.com/deltabeard/Peanut-GB |
 
 ## Acknowledgments
 

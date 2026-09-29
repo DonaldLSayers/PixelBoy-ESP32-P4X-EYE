@@ -9,6 +9,11 @@ typedef enum {
     CAM_MODE_GB,        /* Game Boy Camera look (PIXEL CAM / HARDWARE style) */
     CAM_MODE_DITHER,    /* Dither Cam: arbitrary palette + dither */
     CAM_MODE_NORMAL,    /* plain colour preview, no quantizing */
+    /* Not a real live-preview mode: cycling onto this one launches the GB
+     * emulator (see cycle_cam_mode() in app.c) as a one-shot blocking
+     * excursion, then the cycle immediately skips past it back to
+     * CAM_MODE_GB - cam_mode never actually lingers on this value. */
+    CAM_MODE_EMULATOR,
     CAM_MODE_COUNT
 } cam_mode_t;
 
