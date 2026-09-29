@@ -26,6 +26,7 @@ static char s_root[224];  /* SD card mount root, e.g. "/sdcard" */
 static char s_dir[256];   /* <mount root>/GBCAM */
 static char s_bin_dir[276]; /* <s_dir>/BIN - GB Camera's raw tiles, kept out of the way of the browsable photos */
 static char s_thumb_dir[276]; /* <s_dir>/THUMB - small pre-shrunk copies for the gallery grid, see make_thumbnail() */
+static char s_aeb_dir[276]; /* <s_dir>/AEB - AEB's non-center bracket exposures, see storage_save_aeb_extra() */
 static photo_t *s_photos; /* sorted ascending by number (one shared sequence) */
 static int s_count;
 static int s_next_number = 1;
@@ -62,6 +63,18 @@ static const char *gb_prefix_for(int number)
         if (s_photos[i].number == number && !s_photos[i].is_dc)
             return s_photos[i].prefix;
     return "GB";
+}
+
+/* Same idea for is_dc entries - "DC" (Dither Cam/Normal Cam) or "AEB" (an
+ * AEB/HDR combined result, see app.c's gb_aeb_capture()), both continuous-
+ * tone images saved the same way (storage_save_dc()) under one shared numbered
+ * sequence. */
+static const char *dc_prefix_for(int number)
+{
+    for (int i = 0; i < s_count; i++)
+        if (s_photos[i].number == number && s_photos[i].is_dc)
+            return s_photos[i].prefix;
+    return "DC";
 }
 
 /* thumbnails are always .PNG regardless of the source's own format (Normal
@@ -225,15 +238,24 @@ static void scan(void)
         while ((e = readdir(d)) != NULL) {
             int n;
             char ext[4] = {0};
-            /* FAT may report names in upper or lower case. Each DC-prefixed
-             * number has exactly one file - Dither Cam's .PNG or Normal
-             * Cam's .JPG (see app_storage.h) - so matching either extension
-             * still counts every photo exactly once. GB-prefixed entries
-             * aren't counted here at all any more - see the BIN/ pass below. */
-            if (sscanf(e->d_name, "%*1[Dd]%*1[Cc]%5d.%3s", &n, ext) != 2) continue;
+            /* FAT may report names in upper or lower case. Each DC/AEB-
+             * prefixed number has exactly one file - Dither Cam's .PNG,
+             * Normal Cam's .JPG, or an AEB/HDR combined result's .PNG (see
+             * app_storage.h) - so matching either extension still counts
+             * every photo exactly once. GB-prefixed entries aren't counted
+             * here at all any more - see the BIN/ pass below. */
+            const char *dc_prefix = "DC";
+            if (sscanf(e->d_name, "%*1[Dd]%*1[Cc]%5d.%3s", &n, ext) != 2) {
+                dc_prefix = "AEB";
+                if (sscanf(e->d_name, "AEB%5d.%3s", &n, ext) != 2) continue;
+            }
             if (!(ext[0] == 'P' || ext[0] == 'p' || ext[0] == 'J' || ext[0] == 'j')) continue;
             if (n >= s_next_number) s_next_number = n + 1;
-            if (s_count < MAX_PHOTOS) s_photos[s_count++] = (photo_t){.number = n, .is_dc = true};
+            if (s_count < MAX_PHOTOS) {
+                photo_t *p = &s_photos[s_count++];
+                *p = (photo_t){.number = n, .is_dc = true};
+                snprintf(p->prefix, sizeof p->prefix, "%s", dc_prefix);
+            }
         }
         closedir(d);
     }
@@ -282,6 +304,8 @@ esp_err_t storage_init(void)
     plat_mkdir(s_bin_dir);
     snprintf(s_thumb_dir, sizeof s_thumb_dir, "%s/THUMB", s_dir);
     plat_mkdir(s_thumb_dir);
+    snprintf(s_aeb_dir, sizeof s_aeb_dir, "%s/AEB", s_dir);
+    plat_mkdir(s_aeb_dir);
     migrate_bin_files();
     prune_orphaned_bins();
     scan();
@@ -364,6 +388,62 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
     return number;
 }
 
+/* Shared by storage_save_aeb_extra()/storage_save_aeb_extra_rgb() - both just
+ * differ in how they get to a plain RGB888 buffer to hand off here. */
+static bool write_aeb_png(const uint8_t *rgb, int w, int h, int number, int step)
+{
+    char path[320];
+    snprintf(path, sizeof path, "%s/AEB%05d_%+d.PNG", s_aeb_dir, number, step);
+    bool ok = stbi_write_png(path, w, h, 3, rgb, w * 3) != 0;
+    if (!ok) PLOGW(TAG, "AEB PNG write failed: %s", path);
+    return ok;
+}
+
+/* Saves one of AEB's individual bracket exposures (see app.c's
+ * gb_aeb_capture()) into its own AEB/ subfolder, tagged with the combined/
+ * averaged photo's own gallery number - so a whole bracket set sits
+ * together, findable from the number already visible in the gallery, instead
+ * of cluttering the main numbered sequence/gallery grid with every source
+ * exposure (only the combined result is a real gallery entry). No .BIN or
+ * thumbnail - these aren't gallery entries, just an upscaled PNG in the
+ * current palette (unframed, same rendering as storage_save()'s frame < 0
+ * path) for viewing directly or feeding to an external HDR tool. */
+bool storage_save_aeb_extra(const uint8_t *shades, gbcam_palette_t palette, int number, int step)
+{
+    if (!s_ready) return false;
+
+    int w = GBCAM_W * PNG_SCALE, h = GBCAM_H * PNG_SCALE;
+    uint8_t *rgb = malloc((size_t)w * h * 3);
+    if (!rgb) return false;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const uint8_t *c = gbcam_palette_rgb(palette, shades[(y / PNG_SCALE) * GBCAM_W + x / PNG_SCALE]);
+            memcpy(rgb + ((size_t)y * w + x) * 3, c, 3);
+        }
+    bool ok = write_aeb_png(rgb, w, h, number, step);
+    free(rgb);
+    return ok;
+}
+
+/* Same as storage_save_aeb_extra(), for RGB mode's already-combined
+ * per-channel-dithered image (rgb_mode_combine()'s output) instead of a
+ * single palette-indexed shade buffer - nearest-neighbour upscaled the same
+ * PNG_SCALE amount, no palette lookup needed since it's already RGB888. */
+bool storage_save_aeb_extra_rgb(const uint8_t *rgb888, int number, int step)
+{
+    if (!s_ready) return false;
+
+    int w = GBCAM_W * PNG_SCALE, h = GBCAM_H * PNG_SCALE;
+    uint8_t *rgb = malloc((size_t)w * h * 3);
+    if (!rgb) return false;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            memcpy(rgb + ((size_t)y * w + x) * 3, rgb888 + ((size_t)(y / PNG_SCALE) * GBCAM_W + x / PNG_SCALE) * 3, 3);
+    bool ok = write_aeb_png(rgb, w, h, number, step);
+    free(rgb);
+    return ok;
+}
+
 esp_err_t storage_load(int number, uint8_t *shades)
 {
     char path[300];
@@ -402,7 +482,7 @@ bool storage_has_duplicate_gb_tiles(const uint8_t tiles[GBCAM_TILES_SIZE])
     return false;
 }
 
-int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg)
+int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg, const char *prefix)
 {
     int number = next_number();
     if (number < 0) return -1;
@@ -412,7 +492,7 @@ int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg)
     if (jpeg) {
         /* Normal Cam: a real photo, not pixel art - saved at its actual
          * captured size, no upscale (see app_storage.h). */
-        path_for(path, sizeof path, "DC", number, "JPG");
+        path_for(path, sizeof path, prefix, number, "JPG");
         ok = stbi_write_jpg(path, w, h, 3, rgb888, NORMAL_JPEG_QUALITY) != 0;
         if (!ok) PLOGE(TAG, "JPEG write failed: %s", path);
     } else {
@@ -425,7 +505,7 @@ int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg)
             for (int x = 0; x < sw; x++)
                 memcpy(dst + (size_t)x * 3, src + (size_t)(x / DC_SAVE_SCALE) * 3, 3);
         }
-        path_for(path, sizeof path, "DC", number, "PNG");
+        path_for(path, sizeof path, prefix, number, "PNG");
         ok = stbi_write_png(path, sw, sh, 3, big, sw * 3) != 0;
         free(big);
         if (!ok) PLOGE(TAG, "PNG write failed: %s", path);
@@ -435,11 +515,13 @@ int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg)
      * same box-average work either way, and DC_SAVE_SCALE's 4x nearest-
      * neighbour upscale in the PNG branch above has nothing left to add that
      * a thumbnail would keep anyway. */
-    write_thumbnail("DC", number, rgb888, w, h);
+    write_thumbnail(prefix, number, rgb888, w, h);
 
-    s_photos[s_count++] = (photo_t){.number = number, .is_dc = true};
+    photo_t *p = &s_photos[s_count++];
+    *p = (photo_t){.number = number, .is_dc = true};
+    snprintf(p->prefix, sizeof p->prefix, "%s", prefix);
     s_next_number = number + 1;
-    PLOGI(TAG, "saved photo DC%05d", number);
+    PLOGI(TAG, "saved photo %s%05d", prefix, number);
     return number;
 }
 
@@ -448,13 +530,14 @@ esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h)
     char path[300];
     int w, h, comp;
     uint8_t *rgb = NULL;
+    const char *prefix = dc_prefix_for(number);
     /* Don't know which extension this number was saved with (Dither Cam's
      * PNG or Normal Cam's JPG) without re-scanning the directory - trying
      * both is simpler and this only runs when opening a gallery photo. */
-    path_for(path, sizeof path, "DC", number, "PNG");
+    path_for(path, sizeof path, prefix, number, "PNG");
     rgb = stbi_load(path, &w, &h, &comp, 3);
     if (!rgb) {
-        path_for(path, sizeof path, "DC", number, "JPG");
+        path_for(path, sizeof path, prefix, number, "JPG");
         rgb = stbi_load(path, &w, &h, &comp, 3);
     }
     if (!rgb) return ESP_ERR_NOT_FOUND;
@@ -493,7 +576,7 @@ void storage_free_dc(uint8_t *rgb) { stbi_image_free(rgb); }
 esp_err_t storage_load_thumb(int number, bool is_dc, uint8_t **out_rgb, int *out_w, int *out_h)
 {
     char path[300];
-    thumb_path_for(path, sizeof path, is_dc ? "DC" : gb_prefix_for(number), number);
+    thumb_path_for(path, sizeof path, is_dc ? dc_prefix_for(number) : gb_prefix_for(number), number);
     int comp;
     uint8_t *rgb = stbi_load(path, out_w, out_h, &comp, 3);
     if (rgb) {
@@ -523,14 +606,15 @@ bool storage_photo_path(int number, bool is_dc, char *out, size_t len, const cha
 {
     FILE *f;
     if (is_dc) {
-        /* Dither Cam's PNG or Normal Cam's JPG - see app_storage.h. */
-        path_for(out, len, "DC", number, "PNG");
+        /* Dither Cam/AEB's PNG or Normal Cam's JPG - see app_storage.h. */
+        const char *prefix = dc_prefix_for(number);
+        path_for(out, len, prefix, number, "PNG");
         if ((f = fopen(out, "rb")) != NULL) {
             fclose(f);
             *out_content_type = "image/png";
             return true;
         }
-        path_for(out, len, "DC", number, "JPG");
+        path_for(out, len, prefix, number, "JPG");
         if ((f = fopen(out, "rb")) != NULL) {
             fclose(f);
             *out_content_type = "image/jpeg";
@@ -547,7 +631,7 @@ bool storage_photo_path(int number, bool is_dc, char *out, size_t len, const cha
 
 bool storage_thumb_path(int number, bool is_dc, char *out, size_t len)
 {
-    thumb_path_for(out, len, is_dc ? "DC" : gb_prefix_for(number), number);
+    thumb_path_for(out, len, is_dc ? dc_prefix_for(number) : gb_prefix_for(number), number);
     FILE *f = fopen(out, "rb");
     if (f) {
         fclose(f);
@@ -566,19 +650,20 @@ bool storage_thumb_path(int number, bool is_dc, char *out, size_t len)
 esp_err_t storage_delete(int number, bool is_dc)
 {
     char path[300];
-    const char *prefix = is_dc ? "DC" : gb_prefix_for(number);
+    const char *prefix = is_dc ? dc_prefix_for(number) : gb_prefix_for(number);
     thumb_path_for(path, sizeof path, prefix, number);
     remove(path); /* not every old photo has a thumbnail yet - a failed remove() here is expected, not logged */
     if (is_dc) {
-        /* Only one of these exists for a given number (Dither Cam's .PNG or
-         * Normal Cam's .JPG) - remove() failing on the other is a harmless
-         * no-op, only warn if BOTH fail (the photo's actual file, whichever
-         * format it is, didn't get removed). */
-        path_for(path, sizeof path, "DC", number, "PNG");
+        /* Only one of these exists for a given number (Dither Cam's .PNG,
+         * Normal Cam's .JPG, or an AEB combined result's .PNG) - remove()
+         * failing on the other is a harmless no-op, only warn if BOTH fail
+         * (the photo's actual file, whichever format it is, didn't get
+         * removed). */
+        path_for(path, sizeof path, prefix, number, "PNG");
         bool png_ok = remove(path) == 0;
-        path_for(path, sizeof path, "DC", number, "JPG");
+        path_for(path, sizeof path, prefix, number, "JPG");
         bool jpg_ok = remove(path) == 0;
-        if (!png_ok && !jpg_ok) PLOGW(TAG, "delete failed: DC%05d - neither .PNG nor .JPG removed", number);
+        if (!png_ok && !jpg_ok) PLOGW(TAG, "delete failed: %s%05d - neither .PNG nor .JPG removed", prefix, number);
     } else {
         bin_path_for(path, sizeof path, prefix, number);
         if (remove(path) != 0) PLOGW(TAG, "delete failed: %s", path);

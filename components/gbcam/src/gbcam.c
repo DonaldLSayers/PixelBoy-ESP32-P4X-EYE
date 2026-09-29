@@ -355,25 +355,12 @@ static uint8_t tier_from_gain(uint16_t gain_q8)
     return t;
 }
 
-void gbcam_process_luma(gbcam_t *cam)
+void gbcam_expose_luma(gbcam_t *cam)
 {
     const gbcam_settings_t *s = &cam->settings;
 
-    if (s->style == GBCAM_STYLE_PIXELCAM) {
-        gbcam_process_pixelcam(cam);
-        return;
-    }
-
     if (!s->auto_exposure)
         cam->gain_q8 = s->manual_gain_q8 ? s->manual_gain_q8 : 256;
-
-    cam->tier = tier_from_gain(cam->gain_q8);
-    cam->high_light = s->light_table == GBCAM_TABLE_HIGH_LIGHT ? true
-                    : s->light_table == GBCAM_TABLE_LOW_LIGHT  ? false
-                    : tier_params[cam->tier].high_light;
-    gbcam_edge_mode_t edge = (s->edge_mode == GBCAM_EDGE_AUTO) ? tier_params[cam->tier].edge
-                                                               : s->edge_mode;
-    gbcam_update_matrix(cam);
 
     /* Sensor: exposure (unclamped, like the reference), then onto the MAC-GBD
      * voltage scale: black at code 112, pixel values compressed by 8. */
@@ -385,6 +372,19 @@ void gbcam_process_luma(gbcam_t *cam)
         int code = 128 + (exposed - 128) / (1 << VOLTAGE_SHIFT);
         cam->work[i] = (uint8_t)(code < 0 ? 0 : (code > 255 ? 255 : code));
     }
+}
+
+void gbcam_dither_work(gbcam_t *cam)
+{
+    const gbcam_settings_t *s = &cam->settings;
+
+    cam->tier = tier_from_gain(cam->gain_q8);
+    cam->high_light = s->light_table == GBCAM_TABLE_HIGH_LIGHT ? true
+                    : s->light_table == GBCAM_TABLE_LOW_LIGHT  ? false
+                    : tier_params[cam->tier].high_light;
+    gbcam_edge_mode_t edge = (s->edge_mode == GBCAM_EDGE_AUTO) ? tier_params[cam->tier].edge
+                                                               : s->edge_mode;
+    gbcam_update_matrix(cam);
 
     /* Edge enhancement into shades[] (used as scratch), then the MAC-GBD
      * threshold matrix in place. */
@@ -400,6 +400,19 @@ void gbcam_process_luma(gbcam_t *cam)
             v[i] = code < t[0] ? 3 : code < t[1] ? 2 : code < t[2] ? 1 : 0;
         }
     }
+}
+
+void gbcam_process_luma(gbcam_t *cam)
+{
+    const gbcam_settings_t *s = &cam->settings;
+
+    if (s->style == GBCAM_STYLE_PIXELCAM) {
+        gbcam_process_pixelcam(cam);
+        return;
+    }
+
+    gbcam_expose_luma(cam);
+    gbcam_dither_work(cam);
 
     if (s->auto_exposure)
         auto_exposure_step(cam);

@@ -134,7 +134,7 @@ static int s_grid_cache_page = -1;
 /* ------------------------------------------------------------------- menu */
 
 typedef enum {
-    ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_FRAME, ROW_GB_AUTO, ROW_DC_PALETTE, ROW_DC_METHOD,
+    ROW_PALETTE, ROW_DITHER, ROW_STYLE, ROW_VF_SCALE, ROW_FRAME, ROW_GB_AUTO, ROW_GB_AEB, ROW_DC_PALETTE, ROW_DC_METHOD,
     ROW_DC_SIZE,
     ROW_DC_AMOUNT,
     ROW_DC_AUTO,
@@ -148,7 +148,7 @@ typedef enum {
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[10];
+static menu_row_t s_menu_rows[11]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 4 shared rows */
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -583,6 +583,240 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
     return ESP_OK;
 }
 
+/* Total bracket spread stays fixed at +-this many EV no matter how many shots
+ * are selected - confirmed on real hardware that letting the range grow with
+ * shot count (the previous design: +-(level*0.5) EV) pushes the outer shots
+ * into near-total clipping once level gets past 2 or so, since gbcam's
+ * exposure compression (gbcam.c's "code = 128 + (exposed-128)/8") still can't
+ * prevent hard clipping once gain_q8 - already pushed fairly high by auto-
+ * exposure in anything but bright light - gets multiplied several stops
+ * further on top of that. More shots should mean finer sampling of a range
+ * that's already known to look good, not an ever-wider one that clips at the
+ * edges regardless of count. */
+#define GB_AEB_MAX_EV 1.5f
+
+/* Digital gain for a shot at a given EV offset from center, clamped to the
+ * same range app_gbemu.c's own gain-seeding uses for the same reason (keeps
+ * tier_from_gain() sane). powf() gives a fractional multiplier a plain bit-
+ * shift never could (real AEB implementations bracket in fractional stops
+ * for the same clipping reason as above). */
+static uint16_t gb_aeb_gain_for_ev(uint16_t center_gain, float ev)
+{
+    float mult = powf(2.0f, ev);
+    int32_t g = (int32_t)(center_gain * mult + 0.5f);
+    if (g < 32) g = 32;
+    if (g > 8192) g = 8192;
+    return (uint16_t)g;
+}
+
+/* EV offset for shot i of count, evenly spaced across the fixed
+ * +-GB_AEB_MAX_EV range regardless of count. */
+static float gb_aeb_ev_for_index(int i, int count)
+{
+    return count <= 1 ? 0.0f : -GB_AEB_MAX_EV + i * (2.0f * GB_AEB_MAX_EV) / (float)(count - 1);
+}
+
+/* Live feedback during gb_aeb_capture()/gb_aeb_capture_rgb() in place of the
+ * normal shutter curtain (which implies a single instant, not several) -
+ * shows this step's actual dithered exposure (already rendered to RGB888 by
+ * the caller - palette-mapped shades for plain GB, rgb_mode_combine()'s
+ * output for RGB mode) full-screen with a "BRACKETING i/N" caption, so a
+ * multi-shot burst reads as a burst instead of one long pause. */
+static void display_aeb_progress(const uint8_t *rgb, int i, int count)
+{
+    display_begin_camera(rgb, GBCAM_W, GBCAM_H, false);
+    char msg[20]; /* fits "BRACKETING 13/13" - the current max shot count */
+    snprintf(msg, sizeof msg, "BRACKETING %d/%d", i + 1, count);
+    osd_text(msg, NULL);
+    draw_osd();
+    display_end_frame();
+}
+
+/* Automatic Exposure Bracketing + Average (see ROW_GB_AEB) - HARDWARE style
+ * only: works by directly forcing gbcam's digital exposure gain (gain_q8),
+ * the same knob gb-photo's own AEB varies on real hardware over the M64282FP
+ * sensor; PIXEL CAM style has no equivalent single exposure value to bracket
+ * around. Reprocesses the same already-downsampled s_cam->luma at each step
+ * (gbcam_expose_luma(), not a fresh camera_grab()) - gain_q8 is a post-
+ * capture digital multiplier in this pipeline, not a real sensor integration
+ * time, so every bracketed exposure comes from one live frame rather than N
+ * separate captures.
+ *
+ * The "Average" part (named after gb-printer-web's own tool of the same
+ * name - confirmed against its actual source, average.js: canvas alpha
+ * compositing with globalAlpha = 1/(n+1), which is just a plain per-pixel
+ * mean, nothing fancier) works on the DITHERED shade of each step (0..3), not
+ * the pre-dither exposure data an earlier version of this averaged - fewer
+ * shots landing on the same rounded shade at any one pixel is exactly what
+ * lets the average land BETWEEN two shades, which is the whole point:
+ * confirmed on real hardware that averaging several independently-dithered
+ * exposures reconstructs more apparent grey levels than any single 4-shade
+ * dither could show (temporal dithering/stacking, the same idea film grain
+ * averaging uses) - a real, if modest, benefit even though every step still
+ * comes from one single real capture (see above). Since the result isn't
+ * confined to 4 discrete shades any more, it's saved as a continuous-tone
+ * image (storage_save_dc(), PixelBoy/Digicam's own path) rather than a
+ * "GB"-prefixed 4-shade one - interpolating linearly between the palette's
+ * two nearest shade colours per pixel for the fractional average.
+ *
+ * That combined image is "the final file" and the only real gallery entry;
+ * every individual step (including center) is instead kept as reference
+ * material in its own AEB/ folder, tagged with the combined result's gallery
+ * number, so the main gallery only ever shows one photo per shutter press.
+ * Returns the number of files saved (0 on total failure), matching
+ * take_photo()'s existing single-shot >= 0 success check. */
+static int gb_aeb_capture(void)
+{
+    /* gb_aeb IS the bracket level - i.e. how many half-EV steps either side
+     * of center (gb_aeb=1 -> -1..+1 -> 3 shots, gb_aeb=2 -> 5 shots, etc.) -
+     * so step values need no lookup table, just an offset from the loop
+     * index. */
+    int level = s_set.gb_aeb;
+    int count = level * 2 + 1;
+
+    uint16_t center_gain = s_cam->gain_q8;
+    s_cam->settings.auto_exposure = false;
+
+    uint8_t *shade_sum = malloc(GBCAM_PIXELS); /* max count*3 stays well under 255 for any sane level */
+    static uint8_t progress_rgb[GBCAM_PIXELS * 3];
+    int saved = 0;
+    if (shade_sum) {
+        memset(shade_sum, 0, GBCAM_PIXELS);
+        for (int i = 0; i < count; i++) {
+            s_cam->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_gain, gb_aeb_ev_for_index(i, count));
+            gbcam_expose_luma(s_cam);
+            gbcam_dither_work(s_cam);
+            for (int p = 0; p < GBCAM_PIXELS; p++) shade_sum[p] = (uint8_t)(shade_sum[p] + s_cam->shades[p]);
+            for (int p = 0; p < GBCAM_PIXELS; p++)
+                memcpy(progress_rgb + p * 3, gbcam_palette_rgb((gbcam_palette_t)s_set.palette, s_cam->shades[p]), 3);
+            display_aeb_progress(progress_rgb, i, count);
+            /* Held on screen deliberately - exposing+dithering a 128x112
+             * image is fast enough that the whole burst would otherwise
+             * finish and flip past every step in a handful of milliseconds,
+             * too fast to actually see as a bracketing sequence at all. */
+            plat_sleep_ms(150);
+        }
+
+        uint8_t *rgb = malloc((size_t)GBCAM_PIXELS * 3);
+        if (rgb) {
+            gbcam_palette_t palette = (gbcam_palette_t)s_set.palette;
+            for (int p = 0; p < GBCAM_PIXELS; p++) {
+                /* Fixed-point average in eighths of a shade for interpolation
+                 * precision, then linearly blend the two palette colours
+                 * either side of it. */
+                uint32_t avg8 = ((uint32_t)shade_sum[p] * 8) / (uint32_t)count;
+                int lo = avg8 >> 3;
+                if (lo > 2) lo = 2; /* keep lo+1 a valid shade (<=3) */
+                int frac = avg8 & 7;
+                const uint8_t *c0 = gbcam_palette_rgb(palette, (uint8_t)lo);
+                const uint8_t *c1 = gbcam_palette_rgb(palette, (uint8_t)(lo + 1));
+                for (int ch = 0; ch < 3; ch++)
+                    rgb[p * 3 + ch] = (uint8_t)(c0[ch] + ((int)(c1[ch] - c0[ch]) * frac) / 8);
+            }
+            int number = storage_ready() ? storage_save_dc(rgb, GBCAM_W, GBCAM_H, false, "AEB") : -1;
+            free(rgb);
+            if (number >= 0) {
+                saved++;
+                for (int i = 0; i < count; i++) {
+                    s_cam->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_gain, gb_aeb_ev_for_index(i, count));
+                    gbcam_expose_luma(s_cam);
+                    gbcam_dither_work(s_cam);
+                    if (storage_save_aeb_extra(s_cam->shades, palette, number, i - level))
+                        saved++;
+                }
+            }
+        }
+    }
+    free(shade_sum);
+
+    s_cam->settings.auto_exposure = true;
+    /* Snap the live view straight back to the pre-burst exposure instead of
+     * leaving gain_q8 sitting at the last (most extreme) bracket step and
+     * making auto-exposure visibly hunt its way back over the next second.
+     * s_cam->work/shades are left holding the last reference step's data,
+     * not the combined result, but nothing reads either before the next
+     * live frame (viewfinder_frame()'s regular camera_grab() path) repopulates
+     * them properly on its own. */
+    s_cam->gain_q8 = center_gain;
+    return saved;
+}
+
+/* Same idea as gb_aeb_capture(), for the RGB palette (rgb_mode_active()) -
+ * three independent gbcam_t instances (s_cam_r/g/b, one per colour channel),
+ * each bracketed and averaged the same way, in lockstep (same relative EV
+ * offset from gb_aeb_ev_for_index() applied to each channel's own current
+ * gain, even though the three channels' absolute gains differ). No palette
+ * interpolation needed here - rgb_mode_combine()'s (3 - shade) * 85 mapping
+ * is already linear, so the fractional average shade converts to intensity
+ * directly. */
+static int gb_aeb_capture_rgb(void)
+{
+    int level = s_set.gb_aeb;
+    int count = level * 2 + 1;
+
+    uint16_t center_r = s_cam_r->gain_q8, center_g = s_cam_g->gain_q8, center_b = s_cam_b->gain_q8;
+    s_cam_r->settings.auto_exposure = false;
+    s_cam_g->settings.auto_exposure = false;
+    s_cam_b->settings.auto_exposure = false;
+
+    uint8_t *shade_sum = malloc((size_t)GBCAM_PIXELS * 3); /* interleaved r,g,b per pixel */
+    int saved = 0;
+    if (shade_sum) {
+        memset(shade_sum, 0, (size_t)GBCAM_PIXELS * 3);
+        for (int i = 0; i < count; i++) {
+            s_cam_r->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_r, gb_aeb_ev_for_index(i, count));
+            s_cam_g->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_g, gb_aeb_ev_for_index(i, count));
+            s_cam_b->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_b, gb_aeb_ev_for_index(i, count));
+            gbcam_expose_luma(s_cam_r); gbcam_dither_work(s_cam_r);
+            gbcam_expose_luma(s_cam_g); gbcam_dither_work(s_cam_g);
+            gbcam_expose_luma(s_cam_b); gbcam_dither_work(s_cam_b);
+            for (int p = 0; p < GBCAM_PIXELS; p++) {
+                shade_sum[p * 3 + 0] = (uint8_t)(shade_sum[p * 3 + 0] + s_cam_r->shades[p]);
+                shade_sum[p * 3 + 1] = (uint8_t)(shade_sum[p * 3 + 1] + s_cam_g->shades[p]);
+                shade_sum[p * 3 + 2] = (uint8_t)(shade_sum[p * 3 + 2] + s_cam_b->shades[p]);
+            }
+            rgb_mode_combine();
+            display_aeb_progress(s_rgb_mode_rgb, i, count);
+            plat_sleep_ms(150); /* see gb_aeb_capture()'s own comment on this */
+        }
+
+        uint8_t *rgb = malloc((size_t)GBCAM_PIXELS * 3);
+        if (rgb) {
+            for (int p = 0; p < GBCAM_PIXELS; p++)
+                for (int ch = 0; ch < 3; ch++) {
+                    uint32_t avg8 = ((uint32_t)shade_sum[p * 3 + ch] * 8) / (uint32_t)count; /* 0..24 */
+                    rgb[p * 3 + ch] = (uint8_t)(((3 * 8 - (int)avg8) * 85) / 8);
+                }
+            int number = storage_ready() ? storage_save_dc(rgb, GBCAM_W, GBCAM_H, false, "AEB") : -1;
+            free(rgb);
+            if (number >= 0) {
+                saved++;
+                for (int i = 0; i < count; i++) {
+                    int step = i - level;
+                    s_cam_r->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_r, gb_aeb_ev_for_index(i, count));
+                    s_cam_g->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_g, gb_aeb_ev_for_index(i, count));
+                    s_cam_b->settings.manual_gain_q8 = gb_aeb_gain_for_ev(center_b, gb_aeb_ev_for_index(i, count));
+                    gbcam_expose_luma(s_cam_r); gbcam_dither_work(s_cam_r);
+                    gbcam_expose_luma(s_cam_g); gbcam_dither_work(s_cam_g);
+                    gbcam_expose_luma(s_cam_b); gbcam_dither_work(s_cam_b);
+                    rgb_mode_combine();
+                    if (storage_save_aeb_extra_rgb(s_rgb_mode_rgb, number, step))
+                        saved++;
+                }
+            }
+        }
+    }
+    free(shade_sum);
+
+    s_cam_r->settings.auto_exposure = true;
+    s_cam_g->settings.auto_exposure = true;
+    s_cam_b->settings.auto_exposure = true;
+    s_cam_r->gain_q8 = center_r;
+    s_cam_g->gain_q8 = center_g;
+    s_cam_b->gain_q8 = center_b;
+    return saved;
+}
+
 static void take_photo(void)
 {
     /* Instant feedback the moment the shutter is pressed - the capture (a
@@ -594,20 +828,53 @@ static void take_photo(void)
      * not a hard cut to black - and the camera preview stays live through
      * it (grab_process_draw() grabs a fresh frame each step), not frozen on
      * whatever was on screen the instant the shutter was pressed. */
-    for (int i = 1; i <= 4; i++)
-        if (grab_process_draw(i * 0.125f, NULL, NULL) != ESP_OK) break;
+    /* AEB shows its own bracketing progress in place of the usual closing-
+     * curtain animation (a single instant doesn't read right for a multi-shot
+     * burst) - see gb_aeb_capture()/display_aeb_progress(). Before any of
+     * that, give the live auto-exposure loop a few real seconds on the
+     * current scene to settle before gb_aeb_capture() locks in "center" gain
+     * for everything else to bracket around - auto_exposure_step() only
+     * nudges gain_q8 a little each frame (see gbcam.c), so a shot taken right
+     * after framing a new scene (or right after turning AEB on) could still
+     * be mid-adjustment, which every bracket step would inherit. Live,
+     * uncurtained (grab_process_draw(0, ...) - same call the normal
+     * viewfinder uses) so the screen keeps showing real preview instead of
+     * freezing, with an OSD refreshed every frame so it stays up for the
+     * whole wait instead of OSD_MS's usual ~1s. */
+    bool aeb_shot = s_set.cam_mode == CAM_MODE_GB && s_set.gb_aeb &&
+                    (gbcam_style_t)s_set.style == GBCAM_STYLE_HARDWARE;
+    if (aeb_shot) {
+        int64_t stabilize_until = now_us() + 3 * 1000000LL;
+        while (now_us() < stabilize_until) {
+            osd_text("STABILIZING...", NULL);
+            if (grab_process_draw(0, NULL, NULL) != ESP_OK) break;
+        }
+    } else {
+        for (int i = 1; i <= 4; i++)
+            if (grab_process_draw(i * 0.125f, NULL, NULL) != ESP_OK) break;
+    }
 
     int n;
     if (rgb_mode_active()) {
-        /* True colour, not GB Camera's palette-mapped 2bpp tiles - saved the
-         * same way as a Dither/Normal Cam photo (upscaled PNG), not
-         * storage_save()'s .BIN+palette pair, since there's no single shade
-         * per pixel to store that way. */
-        n = storage_ready() ? storage_save_dc(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false) : -1;
+        if (aeb_shot) {
+            n = gb_aeb_capture_rgb() > 0 ? 0 : -1;
+        } else {
+            if (s_set.gb_aeb) osd_text("AEB NEEDS HW STYLE", NULL);
+            /* True colour, not GB Camera's palette-mapped 2bpp tiles - saved
+             * the same way as a Dither/Normal Cam photo (upscaled PNG), not
+             * storage_save()'s .BIN+palette pair, since there's no single
+             * shade per pixel to store that way. */
+            n = storage_ready() ? storage_save_dc(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false, "DC") : -1;
+        }
     } else if (s_set.cam_mode == CAM_MODE_GB) {
-        memcpy(s_still, s_cam->shades, GBCAM_PIXELS);
         int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
-        n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame, "GB") : -1;
+        if (aeb_shot) {
+            n = gb_aeb_capture() > 0 ? 0 : -1;
+        } else {
+            if (s_set.gb_aeb) osd_text("AEB NEEDS HW STYLE", NULL);
+            memcpy(s_still, s_cam->shades, GBCAM_PIXELS);
+            n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame, "GB") : -1;
+        }
     } else {
         bool jpeg = s_set.cam_mode == CAM_MODE_NORMAL;
         if (jpeg) {
@@ -621,7 +888,7 @@ static void take_photo(void)
         } else {
             memcpy(s_still_rgb, s_dc_rgb, (size_t)s_dc_w * s_dc_h * 3);
         }
-        n = storage_ready() ? storage_save_dc(s_still_rgb, s_dc_w, s_dc_h, jpeg) : -1;
+        n = storage_ready() ? storage_save_dc(s_still_rgb, s_dc_w, s_dc_h, jpeg, "DC") : -1;
     }
     /* Set only now, after the capture/save work above (which can still take
      * a real chunk of time - the SD card write especially) - otherwise that
@@ -757,6 +1024,7 @@ static void build_menu(void)
         s_menu_rows[s_menu_count++] = ROW_VF_SCALE;
         s_menu_rows[s_menu_count++] = ROW_FRAME;
         s_menu_rows[s_menu_count++] = ROW_GB_AUTO;
+        s_menu_rows[s_menu_count++] = ROW_GB_AEB;
     } else if (s_set.cam_mode == CAM_MODE_DITHER) {
         s_menu_rows[s_menu_count++] = ROW_DC_PALETTE;
         s_menu_rows[s_menu_count++] = ROW_DC_METHOD;
@@ -786,11 +1054,11 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
-    /* Sized to match s_menu_rows[] - GB Camera's 6 mode rows + 4 shared rows
-     * (Sleep/Gallery/WiFi/Exit) = 10, the largest any mode builds. */
-    char labels[10][13], values[10][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
-    const char *label_ptrs[10], *value_ptrs[10];
-    icon_id_t icons[10];
+    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 4 shared rows
+     * (Sleep/Gallery/WiFi/Exit) = 11, the largest any mode builds. */
+    char labels[11][13], values[11][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
+    const char *label_ptrs[11], *value_ptrs[11];
+    icon_id_t icons[11];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
@@ -798,7 +1066,7 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "PALETTE");
             /* One slot past the real palettes is the RGB sentinel - see
              * rgb_mode_active(). */
-            if (s_set.palette == (uint8_t)gbcam_palette_count()) truncate_value(values[i], "RGB");
+            if (s_set.palette == (uint8_t)gbcam_palette_count()) truncate_value(values[i], "TRICHROME");
             else truncate_value(values[i], gbcam_palette_name((gbcam_palette_t)s_set.palette));
             val = values[i];
             icons[i] = ICON_PALETTE;
@@ -832,6 +1100,15 @@ static void draw_menu(void)
         case ROW_GB_AUTO:
             snprintf(labels[i], sizeof labels[i], "AUTO");
             snprintf(values[i], sizeof values[i], "%s", s_set.gb_auto ? "ON" : "OFF");
+            val = values[i];
+            icons[i] = ICON_AUTO;
+            break;
+        case ROW_GB_AEB:
+            /* No dedicated icon - reusing AUTO's (both are exposure-related)
+             * rather than adding a new asset for this still-early feature. */
+            snprintf(labels[i], sizeof labels[i], "AEB/HDR");
+            if (s_set.gb_aeb == 0) snprintf(values[i], sizeof values[i], "OFF");
+            else snprintf(values[i], sizeof values[i], "%d SHOTS", s_set.gb_aeb * 2 + 1);
             val = values[i];
             icons[i] = ICON_AUTO;
             break;
@@ -946,6 +1223,12 @@ static void activate_menu_row(void)
     case ROW_GB_AUTO:
         s_set.gb_auto = (uint8_t)(s_set.gb_auto ? 0 : 1);
         apply_settings();
+        break;
+    case ROW_GB_AEB:
+        /* Only applied at capture time (take_photo()) - nothing to push into
+         * s_cam's live settings here, unlike GB_AUTO above. */
+        s_set.gb_aeb = (uint8_t)((s_set.gb_aeb + 1) % 7); /* 0 off, 1..6 -> 3..13 shots */
+        settings_changed(&s_set);
         break;
     case ROW_DC_PALETTE:
         s_set.dc_palette = (uint8_t)((s_set.dc_palette + 1) % dc_palette_count());
@@ -1080,11 +1363,11 @@ static void rotate_viewfinder(int detents)
             int n = gbcam_palette_count() + 1;
             int new_palette = ((v % n) + n) % n;
             if (new_palette == gbcam_palette_count() && !rgb_mode_ensure_ready()) {
-                osd_brief("RGB UNAVAILABLE");
+                osd_brief("TRICHROME UNAVAILABLE");
             } else {
                 s_set.palette = (uint8_t)new_palette;
                 apply_settings();
-                osd_brief(s_set.palette == (uint8_t)gbcam_palette_count() ? "RGB"
+                osd_brief(s_set.palette == (uint8_t)gbcam_palette_count() ? "TRICHROME"
                                                                           : gbcam_palette_name((gbcam_palette_t)s_set.palette));
             }
         } else {
@@ -1601,6 +1884,14 @@ esp_err_t app_init(void)
     gs.max_samples = 4;
     gbcam_init(s_cam, &gs);
     apply_settings();
+    /* Restore RGB mode on boot if it was persisted - rgb_mode_active() can't
+     * just check s_set.palette alone (see its own comment): s_cam_r/g/b are
+     * lazily allocated, normally only by activate_menu_row() actually cycling
+     * onto the RGB sentinel, so a fresh boot would otherwise silently render
+     * the plain GB pipeline (with PALETTE still reading "TRICHROME" in the menu)
+     * until the user cycled it again - confirmed on real hardware. */
+    if (s_set.cam_mode == CAM_MODE_GB && s_set.palette == (uint8_t)gbcam_palette_count())
+        rgb_mode_ensure_ready();
     normal_size(s_set.normal_size, &s_dc_w, &s_dc_h);
 
     esp_err_t err = display_init();

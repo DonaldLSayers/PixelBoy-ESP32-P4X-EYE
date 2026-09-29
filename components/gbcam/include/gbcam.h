@@ -163,6 +163,18 @@ void gbcam_process(gbcam_t *cam, const gbcam_frame_t *frame);
 /* Pipeline from an already-downsampled 128x112 luma image in cam->luma. */
 void gbcam_process_luma(gbcam_t *cam);
 
+/* The two halves of gbcam_process_luma()'s HARDWARE-style path (PIXEL CAM
+ * style has no equivalent split - it's a different pipeline entirely, see
+ * gbcam_process_pixelcam()), exposed separately for AEB-style bracketing:
+ * gbcam_expose_luma() applies (digital) exposure to cam->luma into cam->work,
+ * gbcam_dither_work() runs edge enhancement + threshold dither from cam->work
+ * into cam->shades. Neither touches auto-exposure's own feedback step
+ * (auto_exposure_step(), still only inside gbcam_process_luma()) - a
+ * bracketing caller wants several forced exposures without that adjusting
+ * gain_q8 out from under it between steps. */
+void gbcam_expose_luma(gbcam_t *cam);
+void gbcam_dither_work(gbcam_t *cam);
+
 /* Downsample only (fills cam->luma). */
 void gbcam_downsample(gbcam_t *cam, const gbcam_frame_t *frame);
 
