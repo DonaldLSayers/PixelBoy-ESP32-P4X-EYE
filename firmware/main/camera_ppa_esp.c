@@ -118,3 +118,75 @@ static bool camera_ppa_resample(const gbcam_frame_t *f, int cx0, int cy0, int cw
     memcpy(out_rgb, s_scratch, need);
     return true;
 }
+
+bool camera_ppa_scale_to_rgb565(const uint8_t *rgb888, int sw, int sh,
+                                uint16_t *out_fb, int dw, int dh)
+{
+    if (!s_client) return false;
+
+    int ow, oh;
+    if ((int64_t)sw * dh > (int64_t)sh * dw) {
+        ow = dw;
+        oh = (int)((int64_t)sh * dw / sw);
+    } else {
+        oh = dh;
+        ow = (int)((int64_t)sw * dh / sh);
+    }
+    if (ow < 1) ow = 1;
+    if (oh < 1) oh = 1;
+    int ox = (dw - ow) / 2, oy = (dh - oh) / 2;
+
+    size_t need = (size_t)dw * dh * 2;
+    if (need > s_scratch_size) return false; /* larger than any real preset - shouldn't happen */
+
+    const ppa_srm_oper_config_t cfg = {
+        .in = {
+            .buffer = rgb888,
+            .pic_w = (uint32_t)sw,
+            .pic_h = (uint32_t)sh,
+            .block_w = (uint32_t)sw,
+            .block_h = (uint32_t)sh,
+            .block_offset_x = 0,
+            .block_offset_y = 0,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB888,
+        },
+        .out = {
+            .buffer = s_scratch,
+            .buffer_size = s_scratch_size,
+            .pic_w = (uint32_t)dw,
+            .pic_h = (uint32_t)dh,
+            .block_offset_x = (uint32_t)ox,
+            .block_offset_y = (uint32_t)oy,
+            .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+        },
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+        .scale_x = (float)ow / (float)sw,
+        .scale_y = (float)oh / (float)sh,
+        .mirror_x = false,
+        .mirror_y = false,
+        /* The panel wants big-endian RGB565 (see app_display.c's rgb565())
+         * - PPA's native RGB565 output is little-endian, so this flag asks
+         * it to swap on the way out instead of a separate CPU pass after. */
+        .byte_swap = true,
+        .mode = PPA_TRANS_MODE_BLOCKING,
+    };
+    if (ppa_do_scale_rotate_mirror(s_client, &cfg) != ESP_OK) return false;
+
+    /* Only the block PPA actually touched - any letterbox border outside it
+     * is left as whatever the caller already cleared it to. One contiguous
+     * copy when the scaled image is full-width (every real caller so far -
+     * the source is always wider-than-square, constraining on width),
+     * otherwise per-row so a narrower block doesn't smear into its side
+     * borders. */
+    if (ow == dw) {
+        memcpy((uint8_t *)out_fb + (size_t)oy * dw * 2,
+               s_scratch + (size_t)oy * dw * 2,
+               (size_t)oh * dw * 2);
+    } else {
+        for (int y = 0; y < oh; y++)
+            memcpy((uint8_t *)out_fb + (size_t)(oy + y) * dw * 2 + (size_t)ox * 2,
+                   s_scratch + (size_t)(oy + y) * dw * 2 + (size_t)ox * 2,
+                   (size_t)ow * 2);
+    }
+    return true;
+}

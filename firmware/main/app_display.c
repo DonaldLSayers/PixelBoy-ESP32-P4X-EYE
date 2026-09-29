@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "app_display.h"
+#include "camera_ppa_esp.h"
 #include "display_hw.h"
 #include "font8x8.h"
 #include "icons_data.h"
@@ -226,30 +227,59 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
  * thumbnails (display_grid_cell()) - there, it trades the alias-free
  * guarantee for actually filling the cell; the saved photo is unaffected
  * either way, this only changes the preview. */
+/* Per-row/per-column source index tables - purely a function of (w, h, rw,
+ * rh), not rx/ry/rgb888, and callers with a fixed source/target size (the GB
+ * emulator's 160x144->240x240 every single frame, in particular) call this
+ * with the same (w, h, rw, rh) over and over. Recomputing every destination
+ * pixel's source range via integer division 57600 times a frame was real,
+ * measured cost (see app_gbemu.c's own frame-timing log) for work that's
+ * identical frame to frame - cache it instead, keyed on those four inputs,
+ * and only recompute when one actually changes (a different mode/photo
+ * size). ox/oy still depend on rx/ry too, but are cheap to redo every call. */
 static void fit_rect(const uint8_t *rgb888, int w, int h, int rx, int ry, int rw, int rh)
 {
-    int ow, oh;
-    if ((int64_t)w * rh > (int64_t)h * rw) {
-        ow = rw;
-        oh = (int)((int64_t)h * rw / w);
-    } else {
-        oh = rh;
-        ow = (int)((int64_t)w * rh / h);
-    }
-    if (ow < 1) ow = 1;
-    if (oh < 1) oh = 1;
-    int ox = rx + (rw - ow) / 2, oy = ry + (rh - oh) / 2;
+    static int s_last_w = -1, s_last_h = -1, s_last_rw = -1, s_last_rh = -1;
+    static int s_ow, s_oh;
+    static int s_xa[DISP_W], s_xb[DISP_W], s_ya[DISP_H], s_yb[DISP_H];
 
-    for (int dy = 0; dy < oh; dy++) {
-        int ya = dy * h / oh;
-        int yb = (dy + 1) * h / oh;
-        if (yb <= ya) yb = ya + 1;
-        if (yb > h) yb = h;
-        for (int dx = 0; dx < ow; dx++) {
-            int xa = dx * w / ow;
-            int xb = (dx + 1) * w / ow;
+    if (w != s_last_w || h != s_last_h || rw != s_last_rw || rh != s_last_rh) {
+        if ((int64_t)w * rh > (int64_t)h * rw) {
+            s_ow = rw;
+            s_oh = (int)((int64_t)h * rw / w);
+        } else {
+            s_oh = rh;
+            s_ow = (int)((int64_t)w * rh / h);
+        }
+        if (s_ow < 1) s_ow = 1;
+        if (s_oh < 1) s_oh = 1;
+        for (int dy = 0; dy < s_oh; dy++) {
+            int ya = dy * h / s_oh;
+            int yb = (dy + 1) * h / s_oh;
+            if (yb <= ya) yb = ya + 1;
+            if (yb > h) yb = h;
+            s_ya[dy] = ya;
+            s_yb[dy] = yb;
+        }
+        for (int dx = 0; dx < s_ow; dx++) {
+            int xa = dx * w / s_ow;
+            int xb = (dx + 1) * w / s_ow;
             if (xb <= xa) xb = xa + 1;
             if (xb > w) xb = w;
+            s_xa[dx] = xa;
+            s_xb[dx] = xb;
+        }
+        s_last_w = w;
+        s_last_h = h;
+        s_last_rw = rw;
+        s_last_rh = rh;
+    }
+
+    int ox = rx + (rw - s_ow) / 2, oy = ry + (rh - s_oh) / 2;
+
+    for (int dy = 0; dy < s_oh; dy++) {
+        int ya = s_ya[dy], yb = s_yb[dy];
+        for (int dx = 0; dx < s_ow; dx++) {
+            int xa = s_xa[dx], xb = s_xb[dx];
 
             unsigned sum[3] = {0, 0, 0};
             for (int sy = ya; sy < yb; sy++) {
@@ -275,7 +305,12 @@ void display_begin_camera(const uint8_t *rgb888, int w, int h, bool fill)
     for (int i = 0; i < DISP_W * DISP_H; i++) s_fb[i] = 0;
 
     if (fill) {
-        area_fit(rgb888, w, h);
+        /* PPA hardware scale first - falls back to the CPU box-average path
+         * if unavailable/fails (see camera_ppa_scale_to_rgb565()'s own
+         * comment). Was real, measured cost for the GB emulator's own
+         * per-frame draw (app_gbemu.c's frame-timing log). */
+        if (!camera_ppa_scale_to_rgb565(rgb888, w, h, s_fb, DISP_W, DISP_H))
+            area_fit(rgb888, w, h);
         return;
     }
 

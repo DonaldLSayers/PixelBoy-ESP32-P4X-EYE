@@ -4,6 +4,7 @@ idf_component_register(SRCS "main.c"
                             "app_display.c"
                             "app_frames.c"
                             "app_frames_sd.c"
+                            "app_gbemu.c"
                             "app_input.c"
                             "app_palettes_sd.c"
                             "app_settings.c"
@@ -19,7 +20,7 @@ idf_component_register(SRCS "main.c"
                        REQUIRES gbcam stb esp_driver_gpio esp_driver_pcnt esp_lcd esp_timer nvs_flash fatfs
                                 esp_driver_ppa esp_mm esp_driver_sdmmc sdmmc wear_levelling espressif__esp_tinyusb
                                 espressif__esp_hosted esp_wifi esp_netif esp_event esp_http_server spiffs
-                                esp_partition)
+                                esp_partition peanut_gb)
 
 # A handful of snprintf(path, sizeof path, "%s/%s", dir, dirent->d_name) calls
 # (app_frames_sd.c, app_palettes_sd.c - building a path to something just
@@ -31,3 +32,14 @@ idf_component_register(SRCS "main.c"
 # (see the compiler's own -Wno-error=... flags) - still visible, just not
 # fatal for a case that's safe in practice.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=format-truncation)
+
+# Peanut-GB (vendored, header-only - see components/peanut_gb) is compiled as
+# part of this one file, since app_gbemu.c is the single translation unit
+# that #includes it. CONFIG_COMPILER_OPTIMIZATION_PERF (sdkconfig.defaults)
+# already builds the whole project at -O2; bumping just this file to -O3 is a
+# free, isolated win for the actual CPU/PPU emulation hot loop (gb_run_frame())
+# without touching the rest of the app's build. Real per-frame timing showed
+# it consistently over the Game Boy's own 16.7ms frame budget on its own (see
+# app_gbemu.c's frame-timing log) - this is the CPU emulation side of closing
+# that gap, not the display draw side (already covered separately).
+set_source_files_properties(app_gbemu.c PROPERTIES COMPILE_OPTIONS "-O3")

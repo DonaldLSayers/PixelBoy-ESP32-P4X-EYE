@@ -42,6 +42,7 @@
 #include "app_display.h"
 #include "app_frames.h"
 #include "app_frames_sd.h"
+#include "app_gbemu.h"
 #include "app_input.h"
 #include "app_palettes_sd.h"
 #include "app_settings.h"
@@ -133,14 +134,14 @@ typedef enum {
     ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
     ROW_SLEEP,
-    ROW_GALLERY, ROW_WIFI, ROW_EXIT
+    ROW_GALLERY, ROW_GBEMU, ROW_WIFI, ROW_EXIT
 } menu_row_t;
 
 /* Auto-sleep timeout choices (see SLEEP_OPTIONS_COUNT in app_settings.h,
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[10];
+static menu_row_t s_menu_rows[11];
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -592,7 +593,7 @@ static void take_photo(void)
     } else if (s_set.cam_mode == CAM_MODE_GB) {
         memcpy(s_still, s_cam->shades, GBCAM_PIXELS);
         int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
-        n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame) : -1;
+        n = storage_ready() ? storage_save(s_still, (gbcam_palette_t)s_set.palette, frame, "GB") : -1;
     } else {
         bool jpeg = s_set.cam_mode == CAM_MODE_NORMAL;
         if (jpeg) {
@@ -754,6 +755,7 @@ static void build_menu(void)
     }
     s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
+    s_menu_rows[s_menu_count++] = ROW_GBEMU;
     s_menu_rows[s_menu_count++] = ROW_WIFI;
     s_menu_rows[s_menu_count++] = ROW_EXIT;
     if (s_menu_sel >= s_menu_count) s_menu_sel = s_menu_count - 1;
@@ -873,6 +875,13 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "GALLERY");
             icons[i] = ICON_GALLERY;
             break;
+        case ROW_GBEMU:
+            /* No dedicated icon yet - reusing GALLERY's (browsing content is
+             * the closest existing one) rather than adding a new asset for
+             * this still-early feature. */
+            snprintf(labels[i], sizeof labels[i], "GB EMULATOR");
+            icons[i] = ICON_GALLERY;
+            break;
         case ROW_WIFI:
             snprintf(labels[i], sizeof labels[i], "WIFI GALLERY");
             icons[i] = ICON_WIFI;
@@ -967,6 +976,19 @@ static void activate_menu_row(void)
         s_screen = SCREEN_VIEWFINDER; /* enter_gallery() switches it again if it succeeds */
         enter_gallery();
         return;
+    case ROW_GBEMU:
+        /* gbemu_run() is a self-contained blocking excursion (its own ROM/
+         * save pickers and play loop, own display drawing) rather than a
+         * screen in this state machine. camera_pause() already happened
+         * entering the menu - undo that first: a GB Camera ROM's own live
+         * viewfinder needs the ISP actually streaming (camera_grab() while
+         * paused just returns nothing, seen as the emulator's picture going
+         * black). */
+        camera_resume();
+        gbemu_run();
+        camera_resume();
+        s_screen = SCREEN_VIEWFINDER;
+        return;
     case ROW_WIFI:
         /* camera_pause() already happened entering the menu - stays paused
          * behind this screen, same as ROW_GALLERY, until handle_wifi_input()
@@ -1021,6 +1043,17 @@ static adjust_t load_adjust(uint8_t cam_mode)
 static void cycle_cam_mode(void)
 {
     s_set.cam_mode = (uint8_t)((s_set.cam_mode + 1) % CAM_MODE_COUNT);
+    if (s_set.cam_mode == CAM_MODE_EMULATOR) {
+        /* Launcher slot, not a mode to sit in - see CAM_MODE_EMULATOR's own
+         * comment. Deliberately NOT paused first, unlike entering the menu -
+         * a GB Camera ROM's own live viewfinder needs the ISP actually
+         * streaming (camera_grab() while paused just returns nothing, seen
+         * as the emulator's picture going black). camera_resume() after is
+         * still worth keeping in case anything inside ever does pause it. */
+        gbemu_run();
+        camera_resume();
+        s_set.cam_mode = CAM_MODE_GB;
+    }
     s_adjust = load_adjust(s_set.cam_mode);
     settings_changed(&s_set);
     osd_text(s_set.cam_mode == CAM_MODE_GB       ? "GB CAMERA"

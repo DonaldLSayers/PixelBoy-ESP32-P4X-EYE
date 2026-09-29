@@ -10,7 +10,13 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# Doubled from the default 16384 - app_gbemu.c's Peanut-GB integration runs
+# directly in app_main()'s own call chain (not a separate task), and its
+# frame-stepping/PPU rendering needs more stack than that left room for -
+# crashed with a stack overflow (manifesting as a bogus-looking crash deep in
+# unrelated code, app_display.c's fit_rect(), confirmed via the crash-time
+# saved PC on real hardware) at the old size.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
 # PSRAM (camera frame buffers, PNG encoding)
 CONFIG_SPIRAM=y
@@ -25,14 +31,14 @@ CONFIG_CAM_CTRL_SPI_ENABLE=n
 # Capture at 1280x720, not the sensor's default 1920x1080 - every preview
 # mode (GB Camera, PixelBoy, Digicam) downscales in software every single
 # frame, and none of them ever need more than 720p (Digicam's own largest
-# preset). Capturing at 1080p meant paying for ~2.25x the source pixels only
-# to throw most of them away in that downscale; this is exactly how both
-# reference implementations do it too (xiao-pixelcam sets camera_config_t.
-# frame_size to a fixed smaller mode at init; the Pi/picamera2 one runs a
-# dedicated small "preview" stream, saving full resolution only for the
-# still actually being saved) - not a per-frame resolution change, since the
-# on-device downscale to whatever exact size/aspect the current mode wants
-# still happens the same way it already did.
+# preset). Three lower-resolution experiments (640x480 twice, then 960x540 -
+# see ov2710_mipi_1lane_24Minput_960x540_raw10_25fps.h's own comment for the
+# reasoning behind each) all came out cropped to one side of the sensor on
+# real hardware, with no usable datasheet register-map text found to
+# properly fix it - reverted back to this known-good mode rather than
+# continuing to guess. The three experimental mode files/Kconfig entries are
+# left in place (components compile either way; just not selected here) in
+# case this is worth another attempt later with real datasheet access.
 CONFIG_CAMERA_OV2710_MIPI_RAW10_1280X720_25FPS=y
 # CONFIG_CAMERA_OV2710_MIPI_RAW10_1920X1080_25FPS is not set
 CONFIG_CAMERA_OV2710_MIPI_DEFAULT_FMT_RAW10_1280X720_25FPS=y

@@ -5,6 +5,10 @@ A pocket camera on an Espressif ESP32-P4X-EYE with three modes (Bottom button cy
 - **PIXELBOY** — PIXEL CAM's Dither Cam: 32 palettes, 6 dither methods, 7 output sizes
 - **DIGICAM** — plain colour preview with brightness/contrast
 
+Cycling the Bottom button past DIGICAM launches a built-in **Game Boy emulator** (also
+reachable from Menu → GB EMULATOR) - see [GB Emulator](#gb-emulator) below, including real
+Game Boy Camera cartridge support that feeds the P4's own camera into the game.
+
 ## Controls
 
 | Input | Viewfinder | Menu | Gallery |
@@ -44,6 +48,55 @@ Drop `.hex` files onto the SD card's `/PALETTES` folder (loaded once at boot) - 
 colour per line, 6 hex digits (`#` prefix optional), blank/`#`-comment lines ignored. A
 file with exactly 4 colours shows up as a GB Camera palette; 2-64 colours, as a Dither Cam
 one (so a 4-colour file appears in both). Same format `tools\gen_palettes.py` reads.
+
+## GB Emulator
+
+A built-in Game Boy emulator ([Peanut-GB](https://github.com/deltabeard/Peanut-GB), MIT -
+see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)) for playing your own legally-dumped
+`.gb`/`.gbc` ROMs on the device, with real support for the Game Boy Camera cartridge: it
+feeds the P4's own camera into the cartridge's sensor interface, so the actual GB Camera
+ROM takes "photos" of whatever the P4 sees, dithered through real Game Boy hardware
+emulation - not a screenshot of the P4's own viewfinder.
+
+Reach it by cycling the Bottom button past DIGICAM, or Menu → GB EMULATOR. Drop `.gb`/
+`.gbc` files onto the SD card's `/ROMS` folder (subfolders scanned too, including
+`/ROMS/PROCESSED` - see "GB Camera frames" above) - never commit a ROM (see `.gitignore`).
+
+### Controls
+
+| Input | ROM/save picker | Playing |
+|---|---|---|
+| Encoder press (Shutter) | Pick | A |
+| Turn encoder | Scroll list | Left/Right (or Up/Down - see below), momentary taps |
+| Mode button | — | Start |
+| CamMode (Bottom) button | Cancel back to camera | Select (momentary tap) |
+| Hold CamMode | — | Toggle the encoder between Left/Right and Up/Down |
+| Menu button | Confirms slot 1 (save picker only) | B (momentary tap) |
+| Hold Menu | — | Exit to the camera app |
+
+B and Select are momentary taps rather than true held presses - Menu's and CamMode's
+long-presses are already spoken for (exit, the axis toggle) and a real hold would never
+reach the game past 600ms anyway.
+
+No physical D-pad: the encoder's momentary taps cover one axis at a time (Left/Right by
+default), toggled to Up/Down by holding CamMode - same idiom as Mode-button-click already
+switching what the encoder adjusts in the normal camera app.
+
+### Saves
+
+Choosing a ROM shows a save-slot picker: every existing save for that ROM, plus one "NEW
+SAVE" row past them - pick that to start another slot, with no fixed limit. Saves are
+plain `.sav` files next to the ROM on the SD card (`<rom>.sav`, `<rom>.2.sav`, ...), the
+same convention most GB emulators use, so they're portable to/from other tools.
+
+### Photo extraction
+
+Every time you exit a GB Camera ROM session, any new photos in that save's internal album
+are automatically pulled out into the regular `/GBCAM` gallery (alongside every other
+photo this device takes), named `EMUnnnnn` instead of `GBnnnnn` so they're easy to tell
+apart from the device's own camera captures. This also works retroactively on an existing
+`.sav` you already have (e.g. copied from another emulator or a real cartridge dump) -
+just load it once and exit.
 
 ## USB
 
@@ -172,6 +225,7 @@ assets/icons       menu row icons, 16x16 PNG (edit, then run tools/gen_icons.py)
 assets/frames      GB Camera border art, 160x144/160x224 PNG
 assets/fonts       menu font source (tools/gen_font.py)
 components/gbcam   portable image core (PC + firmware)
+components/peanut_gb  vendored Game Boy emulator core (single header)
 components/stb     PNG writer
 firmware/          ESP-IDF project
 tools/host         PC test tools (photo files, live webcam preview)
