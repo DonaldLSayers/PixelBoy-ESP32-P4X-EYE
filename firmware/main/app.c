@@ -20,10 +20,12 @@
  * scrolls, Menu button (top) selects - drills into the highlighted photo, or
  * backs out to the grid from a single photo. A single GB Camera photo opens
  * 2x cropped with any frame it was saved with stripped back out (matching
- * the viewfinder's own default view); Mode button (middle) toggles that to
- * 1x with its frame, if it was saved with one. Bottom button: delete (click
- * twice to confirm). Shutter (encoder press) always leaves the gallery
- * entirely and goes back to the camera, from either view.
+ * the viewfinder's own default view); Mode button (middle) cycles that to
+ * 1x with its frame (if it was saved with one), then to fit-to-screen (same,
+ * just scaled up as big as it goes instead of exact native size), then back
+ * to 2x cropped. Bottom button: delete (click twice to confirm). Shutter
+ * (encoder press) always leaves the gallery entirely and goes back to the
+ * camera, from any view.
  */
 #include <math.h>
 #include <stdio.h>
@@ -115,7 +117,12 @@ static uint8_t *s_frame_rgb;                         /* GB Camera framed viewfin
 static int s_gallery_pos;
 static bool s_gallery_dirty;
 static bool s_gallery_grid = true;  /* Game Boy Camera's own album view - opens here, drill in with Menu */
-static bool s_gallery_framed;       /* single GB photo view: Mode button toggles 2x crop/no frame vs 1x/with frame */
+/* single GB photo view: Mode button cycles GALLERY_VIEW_CROP2X (default,
+ * no frame) -> GALLERY_VIEW_NATIVE1X (with frame, if saved with one) ->
+ * GALLERY_VIEW_FIT (as big as it fits on screen, still with frame if the
+ * photo has one) -> back to CROP2X. */
+typedef enum { GALLERY_VIEW_CROP2X, GALLERY_VIEW_NATIVE1X, GALLERY_VIEW_FIT, GALLERY_VIEW_COUNT } gallery_view_t;
+static gallery_view_t s_gallery_view;
 static uint8_t *s_gallery_plain_rgb; /* scratch: a saved GB photo with any frame stripped back out, GBCAM_W*GBCAM_H*3 */
 static int64_t s_delete_armed_until_us;
 
@@ -545,11 +552,17 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
         display_begin_camera(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false);
     } else if (s_set.cam_mode == CAM_MODE_GB) {
         const uint8_t *shades = s_cam->shades;
-        /* The frame only shows at 1:1 (see FRAME_PREVIEW_MS above): a brief
-         * flash at 1:1 when you just changed it even in 2x mode, so you can
-         * see the new choice without leaving the crop you're framing with. */
-        bool native1x = s_set.vf_scale != 0 || now_us() < s_frame_preview_until_us;
-        bool show_frame = native1x && s_set.frame != 0;
+        /* The frame never shows cropped (see FRAME_PREVIEW_MS above): a
+         * brief flash at 1:1 when you just changed it in 2x-crop mode (which
+         * can't show a frame at all), so you can see the new choice without
+         * leaving the crop you're framing with. Only overrides from CROP2X -
+         * NATIVE1X/FIT already show frames just fine, forcing 1:1 there would
+         * just be an unwanted zoom-out every time the frame changes. */
+        bool frame_preview_active = now_us() < s_frame_preview_until_us;
+        vf_scale_t vf_scale = (s_set.vf_scale == VF_SCALE_CROP2X && frame_preview_active)
+                                   ? VF_SCALE_NATIVE1X
+                                   : (vf_scale_t)s_set.vf_scale;
+        bool show_frame = vf_scale != VF_SCALE_CROP2X && s_set.frame != 0;
         int framed_w = 0, framed_h = 0;
         if (show_frame) {
             const frame_meta_t *fm = frames_get(s_set.frame - 1);
@@ -559,7 +572,8 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
         display_begin_viewfinder(shades, (gbcam_palette_t)s_set.palette,
                                  s_set.brightness, GBCAM_BRIGHTNESS_LEVELS - 1,
                                  s_set.contrast, GBCAM_CONTRAST_LEVELS - 1, (int)s_adjust,
-                                 native1x, show_frame ? s_frame_rgb : NULL, framed_w, framed_h);
+                                 vf_scale, frame_preview_active,
+                                 show_frame ? s_frame_rgb : NULL, framed_w, framed_h);
     } else {
         display_begin_camera(s_dc_rgb, s_dc_live_w, s_dc_live_h, s_set.cam_mode == CAM_MODE_NORMAL);
     }
@@ -652,7 +666,7 @@ static void enter_gallery(void)
     s_gallery_pos = storage_count() - 1;
     s_gallery_grid = true;
     s_grid_cache_page = -1; /* force a fresh decode - see gallery_grid_frame() */
-    s_gallery_framed = false;
+    s_gallery_view = GALLERY_VIEW_CROP2X;
     s_gallery_dirty = true;
     s_delete_armed_until_us = 0;
 }
@@ -802,7 +816,9 @@ static void draw_menu(void)
             break;
         case ROW_VF_SCALE:
             snprintf(labels[i], sizeof labels[i], "SCALE");
-            snprintf(values[i], sizeof values[i], "%s", s_set.vf_scale ? "1:1" : "2X CROP");
+            snprintf(values[i], sizeof values[i], "%s",
+                     s_set.vf_scale == VF_SCALE_NATIVE1X ? "1:1" :
+                     s_set.vf_scale == VF_SCALE_FIT      ? "FIT" : "2X CROP");
             val = values[i];
             icons[i] = ICON_SIZE;
             break;
@@ -925,7 +941,7 @@ static void activate_menu_row(void)
         apply_settings();
         break;
     case ROW_VF_SCALE:
-        s_set.vf_scale = (uint8_t)(s_set.vf_scale ? 0 : 1);
+        s_set.vf_scale = (uint8_t)((s_set.vf_scale + 1) % 3);
         settings_changed(&s_set);
         break;
     case ROW_FRAME:
@@ -1229,7 +1245,7 @@ static void handle_gallery_input(const input_event_t *ev)
         s_gallery_pos = pos < 0 ? 0 : pos > max ? max : pos;
         s_delete_armed_until_us = 0;
         s_osd.until_us = 0;
-        s_gallery_framed = false;
+        s_gallery_view = GALLERY_VIEW_CROP2X;
         s_gallery_dirty = true;
         return;
     }
@@ -1239,14 +1255,16 @@ static void handle_gallery_input(const input_event_t *ev)
         /* Select: grid -> drill into the highlighted photo; single photo ->
          * back out to the grid, like the real Game Boy Camera's album. */
         s_gallery_grid = !s_gallery_grid;
-        s_gallery_framed = false;
+        s_gallery_view = GALLERY_VIEW_CROP2X;
         s_gallery_dirty = true;
     } else if (ev->type == INPUT_CLICK && ev->button == BTN_MODE) {
-        /* Show the GB photo at 1:1, with its frame if one's currently
-         * selected (s_set.frame) - Dither/Normal Cam photos aren't shades,
-         * there's nothing to frame, so this is a no-op for those. */
+        /* Cycles 2x crop (no frame) -> 1:1 native (with frame, if the photo
+         * has one) -> fit-to-screen (as big as it goes, still with frame if
+         * it has one) -> back to 2x crop. Dither/Normal Cam photos aren't
+         * shades, there's nothing to frame/crop specially, so this is a
+         * no-op for those. */
         if (!s_gallery_grid && !storage_is_dc_at(s_gallery_pos)) {
-            s_gallery_framed = !s_gallery_framed;
+            s_gallery_view = (gallery_view_t)((s_gallery_view + 1) % GALLERY_VIEW_COUNT);
             s_gallery_dirty = true;
         }
     } else if (ev->type == INPUT_CLICK && ev->button == BTN_CAMMODE) {
@@ -1520,14 +1538,19 @@ static void gallery_frame(void)
         /* The actual saved GBnnnnn.PNG, not a recompose from the .BIN's
          * palette-free shades against whatever palette/frame happen to be
          * selected right now - this always shows the photo exactly as it
-         * was saved, in both views. Default: the plain photo (any frame
+         * was saved, in every view. Default: the plain photo (any frame
          * stripped back out - see extract_plain_photo()), 2x cropped, like
-         * the viewfinder's own default view. Mode button (s_gallery_framed):
-         * 1x, with its frame if it was saved with one. */
+         * the viewfinder's own default view. Mode button cycles to 1x (with
+         * its frame if it was saved with one), then to fit-to-screen (same
+         * idea, just scaled up as big as it goes instead of shown at exact
+         * native size - whatever the PNG's own dimensions are, framed or
+         * not, same area_fit()/PPA path the live viewfinder itself uses). */
         uint8_t *rgb;
         int w, h;
         if (storage_load_gb_png(number, &rgb, &w, &h) == ESP_OK) {
-            if (s_gallery_framed) {
+            if (s_gallery_view == GALLERY_VIEW_FIT) {
+                display_begin_camera(rgb, w, h, true);
+            } else if (s_gallery_view == GALLERY_VIEW_NATIVE1X) {
                 int nw, nh;
                 downscale_to_native(rgb, w, h, &nw, &nh);
                 display_begin_native(s_frame_rgb, nw, nh);

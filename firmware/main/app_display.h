@@ -26,10 +26,14 @@ void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette);
 #define VF_IMG_X 16
 #define VF_IMG_W 224
 #define VF_IMG_H 224
-/* native1x: false shows the photo at 2x, cropped to VF_IMG_W/2 x GBCAM_H
- * source pixels (the default); true shows the full 128x112 sensor image at
- * 1x instead, centred in the same image area. Either way the bars/corner
- * label are unchanged - only how the photo itself is laid out changes.
+/* vf_scale: VF_SCALE_CROP2X shows the photo at 2x, cropped to VF_IMG_W/2 x
+ * GBCAM_H source pixels (the default, full sensor width not shown);
+ * VF_SCALE_NATIVE1X shows the full 128x112 sensor image at 1x instead,
+ * centred in the same image area (small letterbox bars either side);
+ * VF_SCALE_FIT shows the same full image as VF_SCALE_NATIVE1X but scaled up
+ * as big as it fits (area-averaged, not a crop) - the full field of view,
+ * just bigger than a bare 1x. Either way the bars/corner label are
+ * unchanged - only how the photo itself is laid out changes.
  *
  * adjust: which of GB's three quick-adjust targets the encoder currently
  * moves - 0 brightness, 1 contrast, 2 palette. Lights the matching bar
@@ -37,12 +41,28 @@ void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette);
  *
  * framed_rgb888: NULL for the plain shades-only draw above; otherwise an
  * already-composed frame_compose_rgb() canvas (see app_frames.h) to show
- * instead, centred the same way - only valid alongside native1x (a frame
- * only ever shows at 1:1, see FRAME_PREVIEW_MS in app.c). */
+ * instead, centred/scaled the same way - only valid alongside
+ * VF_SCALE_NATIVE1X or VF_SCALE_FIT (a frame never shows cropped, see
+ * FRAME_PREVIEW_MS in app.c).
+ *
+ * frame_preview_active: only matters for VF_SCALE_FIT with a frame - a tall
+ * ("Wild", 160x224) frame's own aspect ratio is narrower than the square
+ * image area, so scaling it to show the whole thing uncropped (what
+ * frame_preview_active does, true while FRAME_PREVIEW_MS's brief post-
+ * change flash is up) lands the photo itself noticeably smaller than a
+ * normal (160x144) frame gets. Once that expires, the steady-state view
+ * instead scales by width alone (matching what a normal frame's own natural
+ * fit already works out to) and centre-crops the frame's top/bottom to fit -
+ * same photo size regardless of which frame is active, at the cost of
+ * cropping a tall frame's own border art down to a 160x160 square. A normal
+ * (144-tall) frame never needs that crop in the first place, so both phases
+ * already look identical for one - no visible jump, only tall frames
+ * actually zoom in after the preview window. */
+typedef enum { VF_SCALE_CROP2X, VF_SCALE_NATIVE1X, VF_SCALE_FIT } vf_scale_t;
 void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
                               int brightness, int brightness_max,
                               int contrast, int contrast_max, int adjust,
-                              bool native1x,
+                              vf_scale_t vf_scale, bool frame_preview_active,
                               const uint8_t *framed_rgb888, int framed_w, int framed_h);
 
 /* Start a new frame filled with one colour (RGB888). */

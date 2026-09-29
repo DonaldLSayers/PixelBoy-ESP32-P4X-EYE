@@ -38,7 +38,7 @@ bool settings_valid(const app_settings_t *s)
           s->style < GBCAM_STYLE_COUNT && s->cam_mode < CAM_MODE_COUNT &&
           s->dc_palette < DC_PALETTE_COUNT + MAX_SD_PALETTES && s->dc_method < DC_METHOD_COUNT &&
           s->dc_size < DC_SIZE_COUNT && s->dc_amount >= 0.0f && s->dc_amount <= 1.0f &&
-          s->vf_scale <= 1 && s->normal_size < NORMAL_SIZE_COUNT &&
+          s->vf_scale <= 2 && s->normal_size < NORMAL_SIZE_COUNT &&
           s->frame <= FRAME_COUNT + MAX_SD_FRAMES && s->sleep_min < SLEEP_OPTIONS_COUNT &&
           s->gb_auto <= 1 && s->dc_auto <= 1 && s->dc_edge <= 1))
         return false;

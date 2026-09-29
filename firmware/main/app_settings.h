@@ -28,7 +28,7 @@ typedef struct {
     uint8_t dc_method; /* dc_method_t */
     uint8_t dc_size;
     float dc_amount;
-    uint8_t vf_scale;    /* GB Camera viewfinder: 0 = 2x cropped (224x224, default), 1 = 1:1 (128x112) */
+    uint8_t vf_scale;    /* GB Camera viewfinder: vf_scale_t (app_display.h) - 0 = 2x cropped (default), 1 = 1:1, 2 = fit-to-screen */
     uint8_t normal_size; /* Normal Cam resolution, see normal_size() in dithercam.h */
     uint8_t frame;       /* GB Camera border: 0 = none, 1..FRAME_COUNT = frame_id_t + 1, see frames.h */
     uint8_t adjust[CAM_MODE_COUNT]; /* per-mode quick-adjust dial target (adjust_t in app.c), Mode-button-click cycles it */

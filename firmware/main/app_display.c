@@ -12,6 +12,10 @@
 
 static uint16_t *s_fb;
 
+/* Forward declaration - defined further down, but display_begin_viewfinder()
+ * (above that in the file) needs it for VF_SCALE_FIT. */
+static void fit_rect(const uint8_t *rgb888, int w, int h, int rx, int ry, int rw, int rh);
+
 /* The panel expects big-endian RGB565 (BSP_LCD_BIGENDIAN). */
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -130,7 +134,7 @@ static void draw_glyph2x(const char *const *rows, int n, int x, int y, const uin
 void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
                               int brightness, int brightness_max,
                               int contrast, int contrast_max, int adjust,
-                              bool native1x,
+                              vf_scale_t vf_scale, bool frame_preview_active,
                               const uint8_t *framed_rgb888, int framed_w, int framed_h)
 {
     bool brightness_active = adjust == 0, contrast_active = adjust == 1;
@@ -145,9 +149,47 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
     fill_rect565(0, 0, VF_IMG_X, DISP_H, lut[3]);
     fill_rect565(VF_IMG_X, VF_IMG_H, DISP_W - VF_IMG_X, DISP_H - VF_IMG_H, lut[3]);
 
-    if (framed_rgb888) {
+    if (vf_scale == VF_SCALE_FIT) {
+        /* As big as the full (uncropped) image fits in the image area -
+         * fit_rect() (this file's own area_fit()/display_begin_camera()
+         * helper) does exactly that, area-averaged rather than a crop; it
+         * just needs an RGB888 source, so the plain (unframed) case
+         * converts shades->RGB888 into a small scratch buffer first, since
+         * fit_rect() has no idea what a "shade" or a palette is. A framed
+         * canvas is already RGB888 (frame_compose_rgb()), no conversion
+         * needed. */
+        static uint8_t s_vf_fit_rgb[GBCAM_W * GBCAM_H * 3];
+        fill_rect565(VF_IMG_X, 0, VF_IMG_W, VF_IMG_H, lut[3]);
+        if (framed_rgb888 && frame_preview_active) {
+            /* Whole frame, uncropped, whatever scale that naturally works
+             * out to - see this function's own comment on
+             * frame_preview_active. */
+            fit_rect(framed_rgb888, framed_w, framed_h, VF_IMG_X, 0, VF_IMG_W, VF_IMG_H);
+        } else if (framed_rgb888) {
+            /* Steady state: scale by width alone (same photo size a normal
+             * frame gets) and centre-crop vertically to the square image
+             * area instead of letterboxing - only actually crops anything
+             * for a tall ("Wild") frame; a normal one already fits within
+             * this same crop height, so cropped_h below just ends up equal
+             * to framed_h and this is identical to the preview branch above. */
+            int visible_src_h = VF_IMG_H * framed_w / VF_IMG_W;
+            int cropped_h = framed_h < visible_src_h ? framed_h : visible_src_h;
+            int crop_y = (framed_h - cropped_h) / 2;
+            fit_rect(framed_rgb888 + (size_t)crop_y * framed_w * 3, framed_w, cropped_h,
+                     VF_IMG_X, 0, VF_IMG_W, VF_IMG_H);
+        } else {
+            for (int i = 0; i < GBCAM_PIXELS; i++) {
+                const uint8_t *c = gbcam_palette_rgb(palette, shades[i] & 3);
+                s_vf_fit_rgb[i * 3 + 0] = c[0];
+                s_vf_fit_rgb[i * 3 + 1] = c[1];
+                s_vf_fit_rgb[i * 3 + 2] = c[2];
+            }
+            fit_rect(s_vf_fit_rgb, GBCAM_W, GBCAM_H, VF_IMG_X, 0, VF_IMG_W, VF_IMG_H);
+        }
+    } else if (framed_rgb888) {
         /* A frame_compose_rgb() canvas (border + photo, already recoloured)
-         * at 1x, centred the same way native1x's plain draw below is. */
+         * at 1x, centred the same way VF_SCALE_NATIVE1X's plain draw below
+         * is. */
         const int ox = VF_IMG_X + (VF_IMG_W - framed_w) / 2, oy = (VF_IMG_H - framed_h) / 2;
         fill_rect565(VF_IMG_X, 0, VF_IMG_W, VF_IMG_H, lut[3]);
         for (int sy = 0; sy < framed_h; sy++) {
@@ -155,7 +197,7 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
             uint16_t *d = s_fb + (oy + sy) * DISP_W + ox;
             for (int sx = 0; sx < framed_w; sx++) d[sx] = rgb565(src[sx * 3], src[sx * 3 + 1], src[sx * 3 + 2]);
         }
-    } else if (native1x) {
+    } else if (vf_scale == VF_SCALE_NATIVE1X) {
         /* Full 128x112 sensor image at 1x, centred in the same image area. */
         const int ox = VF_IMG_X + (VF_IMG_W - GBCAM_W) / 2, oy = (VF_IMG_H - GBCAM_H) / 2;
         fill_rect565(VF_IMG_X, 0, VF_IMG_W, VF_IMG_H, lut[3]);
