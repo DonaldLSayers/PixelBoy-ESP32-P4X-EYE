@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
+
 #include "app_display.h"
 #include "camera_ppa_esp.h"
 #include "display_hw.h"
@@ -158,7 +160,14 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
          * fit_rect() has no idea what a "shade" or a palette is. A framed
          * canvas is already RGB888 (frame_compose_rgb()), no conversion
          * needed. */
-        static uint8_t s_vf_fit_rgb[GBCAM_W * GBCAM_H * 3];
+        /* PSRAM, not a plain static array - internal RAM is scarce enough
+         * elsewhere (the GB emulator's own background task needs a real
+         * stack out of it) that a spare ~42KB sitting in BSS for this isn't
+         * free; confirmed on real hardware that it was enough to push
+         * internal free heap low enough for that task's own creation to
+         * silently fail (a blank camera image, no other symptom). */
+        static uint8_t *s_vf_fit_rgb;
+        if (!s_vf_fit_rgb) s_vf_fit_rgb = heap_caps_malloc(GBCAM_W * GBCAM_H * 3, MALLOC_CAP_SPIRAM);
         fill_rect565(VF_IMG_X, 0, VF_IMG_W, VF_IMG_H, lut[3]);
         if (framed_rgb888 && frame_preview_active) {
             /* Whole frame, uncropped, whatever scale that naturally works
@@ -177,7 +186,7 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
             int crop_y = (framed_h - cropped_h) / 2;
             fit_rect(framed_rgb888 + (size_t)crop_y * framed_w * 3, framed_w, cropped_h,
                      VF_IMG_X, 0, VF_IMG_W, VF_IMG_H);
-        } else {
+        } else if (s_vf_fit_rgb) {
             for (int i = 0; i < GBCAM_PIXELS; i++) {
                 const uint8_t *c = gbcam_palette_rgb(palette, shades[i] & 3);
                 s_vf_fit_rgb[i * 3 + 0] = c[0];

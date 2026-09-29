@@ -222,8 +222,17 @@ static void gbcam_emu_init(void)
      * the ~30ms of real work it does every cycle actually runs in parallel
      * with the game instead of still competing for the same core's time
      * slices, which is what made things feel slower rather than smoother. */
-    xTaskCreatePinnedToCore(gbcam_emu_task, "gbcam_emu", 32768, NULL,
-                            tskIDLE_PRIORITY + 2, &s_cam_task_handle, 1);
+    BaseType_t ok = xTaskCreatePinnedToCore(gbcam_emu_task, "gbcam_emu", 32768, NULL,
+                                            tskIDLE_PRIORITY + 2, &s_cam_task_handle, 1);
+    /* Silently failing here (its return was never checked before) looks
+     * exactly like a black/white screen with no other symptom - the image
+     * area just never gets touched past its zeroed default. Confirmed on
+     * real hardware: internal (not PSRAM) free heap had dropped enough that
+     * this 32KB stack no longer fit. */
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "gbcam_emu task creation failed (%d) - camera image will stay blank", (int)ok);
+        s_cam_task_handle = NULL;
+    }
 }
 
 /* Stops and waits for the background capture task to actually exit before
