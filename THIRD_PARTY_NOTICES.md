@@ -13,6 +13,13 @@ No code copied, but [Raphael-Boichot](https://github.com/Raphael-Boichot) - whos
 Camera/Printer reverse-engineering work informed some of the concepts here (M64282FP sensor
 behaviour, MAC-GBD/GameBoy Printer protocol details) - deserves a thank-you.
 
+Also no code copied, but the GB Camera AEB/HDR feature's "Average" combine step is named
+after, and confirmed against the actual source of,
+[gb-printer-web](https://github.com/HerrZatacke/gb-printer-web)'s own tool of the same name
+(`average.js`) - a plain per-pixel mean, which is why this project's own version instead
+averages already-dithered shades (reconstructing extra apparent grey levels from independent
+dither patterns) rather than raw pre-dither exposure data.
+
 ## Colour palettes
 
 Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xiao-pixelcam/sd_card/palettes/`) - almost all from [Lospec](https://lospec.com/palette-list), the pixel-art palette database; credited below to whoever Lospec itself credits (a named artist, or the hardware/software a palette is drawn from, where that's how Lospec lists it). Each is free to use/redistribute per Lospec's site-wide terms, but the individual artist's name should stay attached - hence this table.

@@ -41,6 +41,19 @@ bool storage_is_dc_at(int pos);
 #define GB_PNG_SCALE 4
 int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, const char *prefix);
 
+/* Saves one of AEB's individual bracket exposures into its own AEB/ folder
+ * (see app_storage.c) instead of the main gallery - step is the EV step this
+ * exposure was taken at (may be 0, the center exposure - the combined/
+ * averaged result is the one real gallery entry, via a normal storage_save()
+ * call), number is that combined result's own gallery number, tying the
+ * whole bracket set together. */
+bool storage_save_aeb_extra(const uint8_t *shades, gbcam_palette_t palette, int number, int step);
+
+/* Same as storage_save_aeb_extra(), for RGB mode's own already-combined RGB888
+ * image (rgb_mode_combine()'s output) instead of a palette-indexed shade
+ * buffer - see app_storage.c. */
+bool storage_save_aeb_extra_rgb(const uint8_t *rgb888, int number, int step);
+
 esp_err_t storage_load(int number, uint8_t *shades);
 
 /* True if some existing GB/EMU photo's raw tiles already match byte-for-byte
@@ -59,7 +72,11 @@ esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *ou
  * number, or -1 on error. */
 #define DC_SAVE_SCALE 4
 #define NORMAL_JPEG_QUALITY 90
-int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg);
+/* prefix is "DC" for a normal Dither/Normal Cam or Trichrome capture, or
+ * "AEB" for an AEB/HDR combined result (see app.c's gb_aeb_capture()) - same
+ * shared numbered sequence either way, just distinguishable on the SD card
+ * and in storage_is_dc_at()'s callers via storage_photo_path()'s prefix. */
+int storage_save_dc(const uint8_t *rgb888, int w, int h, bool jpeg, const char *prefix);
 
 /* Decodes a saved DCnnnnn.PNG/.JPG back to RGB888 for the gallery (already at
  * its saved size - typically far bigger than the screen, so display it with

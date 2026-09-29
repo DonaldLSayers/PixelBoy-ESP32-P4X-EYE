@@ -5,9 +5,9 @@ A pocket camera on an Espressif ESP32-P4X-EYE with three modes (Bottom button cy
 - **PIXELBOY** — PIXEL CAM's Dither Cam: 32 palettes, 6 dither methods, 7 output sizes
 - **DIGICAM** — plain colour preview with brightness/contrast
 
-Cycling the Bottom button past DIGICAM launches a built-in **Game Boy emulator** (also
-reachable from Menu → GB EMULATOR) - see [GB Emulator](#gb-emulator) below, including real
-Game Boy Camera cartridge support that feeds the P4's own camera into the game.
+Cycling the Bottom button past DIGICAM launches a built-in **Game Boy emulator** - see
+[GB Emulator](#gb-emulator) below, including real Game Boy Camera cartridge support that
+feeds the P4's own camera into the game.
 
 ## Controls
 
@@ -23,7 +23,8 @@ Game Boy Camera cartridge support that feeds the P4's own camera into the game.
 
 The **menu** lists the current mode's settings plus Sleep (auto-sleep timeout), Gallery
 and Exit:
-- **GB Camera:** Palette, Dither, Style, Scale, Frame, Auto (auto brightness/contrast)
+- **GB Camera:** Palette, Dither, Style, Scale, Frame, Auto (auto brightness/contrast),
+  AEB/HDR (see [AEB / HDR](#aeb--hdr) below)
 - **PixelBoy:** Palette, Method, Size, Amount, Auto (auto-exposure), Edge (sharpen)
 - **Digicam:** Size
 
@@ -49,6 +50,28 @@ colour per line, 6 hex digits (`#` prefix optional), blank/`#`-comment lines ign
 file with exactly 4 colours shows up as a GB Camera palette; 2-64 colours, as a Dither Cam
 one (so a 4-colour file appears in both). Same format `tools\gen_palettes.py` reads.
 
+### AEB / HDR
+
+GB Camera's HARDWARE style only (PIXEL CAM style has no single exposure value to bracket
+around). The AEB/HDR menu row cycles OFF → 3 → 5 → 7 → 9 → 11 → 13 shots. Pressing the
+shutter takes that many exposures in a burst - shown live on screen as "BRACKETING i/N" in
+place of the usual shutter animation - evenly spread across a fixed ±1.5 EV range around
+whatever the live auto-exposure has already converged to, regardless of how many shots are
+picked (more shots means finer sampling of that same range, not a wider one - a wider range
+clips the outermost shots to near-total white/black). The shots are then averaged (named
+after [gb-printer-web](https://github.com/HerrZatacke/gb-printer-web)'s own "Average" tool)
+into a single combined photo - averaging several independently-dithered exposures of the
+same scene reconstructs more apparent grey levels than any single 4-shade image can show,
+the same idea film grain averaging uses.
+
+That combined result is the one photo that lands in the gallery (as a continuous-tone image,
+`AEBnnnnn.PNG`, alongside `DCnnnnn.PNG` - not a 4-shade `GBnnnnn` one, since it's no longer
+confined to 4 shades). Every individual bracket exposure is instead kept as reference
+material in the SD card's `/GBCAM/AEB` folder, tagged with the combined result's own gallery
+number (`AEBnnnnn_+1.PNG`, `AEBnnnnn_-2.PNG`, ...) - useful for feeding to an external HDR/
+exposure-fusion tool, or just for comparison. Works in the RGB palette (Trichrome) too,
+bracketing all three colour channels in lockstep.
+
 ## GB Emulator
 
 A built-in Game Boy emulator ([Peanut-GB](https://github.com/deltabeard/Peanut-GB), MIT -
@@ -58,9 +81,9 @@ feeds the P4's own camera into the cartridge's sensor interface, so the actual G
 ROM takes "photos" of whatever the P4 sees, dithered through real Game Boy hardware
 emulation - not a screenshot of the P4's own viewfinder.
 
-Reach it by cycling the Bottom button past DIGICAM, or Menu → GB EMULATOR. Drop `.gb`/
-`.gbc` files onto the SD card's `/ROMS` folder (subfolders scanned too, including
-`/ROMS/PROCESSED` - see "GB Camera frames" above) - never commit a ROM (see `.gitignore`).
+Reach it by cycling the Bottom button past DIGICAM. Drop `.gb`/`.gbc` files onto the SD
+card's `/ROMS` folder (subfolders scanned too, including `/ROMS/PROCESSED` - see "GB Camera
+frames" above) - never commit a ROM (see `.gitignore`).
 
 ### Controls
 
@@ -74,7 +97,11 @@ Reach it by cycling the Bottom button past DIGICAM, or Menu → GB EMULATOR. Dro
 | Menu button | Confirms slot 1 (save picker only) | B (momentary tap) |
 | Hold Menu | — | Exit to the camera app |
 
-B and Select are momentary taps rather than true held presses - Menu's and CamMode's
+Shutter, B and Select are all momentary taps rather than true held presses. Shutter's real
+press duration would otherwise bleed into whatever screen comes right after it - a ROM that
+transitions on shutter-press (e.g. gb-photo's own "Save?" prompt) could see it still
+logically held on the very next frame and treat that as an instant confirm, skipping the
+prompt entirely. B and Select are momentary for a different reason: Menu's and CamMode's
 long-presses are already spoken for (exit, the axis toggle) and a real hold would never
 reach the game past 600ms anyway.
 
@@ -91,12 +118,19 @@ same convention most GB emulators use, so they're portable to/from other tools.
 
 ### Photo extraction
 
-Every time you exit a GB Camera ROM session, any new photos in that save's internal album
-are automatically pulled out into the regular `/GBCAM` gallery (alongside every other
-photo this device takes), named `EMUnnnnn` instead of `GBnnnnn` so they're easy to tell
-apart from the device's own camera captures. This also works retroactively on an existing
-`.sav` you already have (e.g. copied from another emulator or a real cartridge dump) -
-just load it once and exit.
+"PULL NEW PHOTOS" - the first row of the ROM list, above the ROMs themselves - scans every
+save (all slots, every ROM) under `/ROMS` and pulls new photos out of each Game Boy Camera
+save's internal album into the regular `/GBCAM` gallery (alongside every other photo this
+device takes), named `EMUnnnnn` instead of `GBnnnnn` so they're easy to tell apart from the
+device's own camera captures.
+
+This is a manual action, not automatic on exit: a physical save slot number isn't a stable
+photo identity (gb-photo's own "Clear camera roll" frees every slot for reuse, so the next
+photo taken can land right back in a slot an earlier pull had already handled), so it
+compares actual photo bytes against every photo already in the gallery instead of tracking
+which slots were seen before - correct regardless of slot reuse, at the cost of not running
+by itself. Works retroactively on any existing `.sav` too (e.g. copied from another emulator
+or a real cartridge dump) - just run "PULL NEW PHOTOS" once it's on the SD card.
 
 ## USB
 
