@@ -625,7 +625,10 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
         vf_scale_t vf_scale = (s_set.vf_scale == VF_SCALE_CROP2X && frame_preview_active)
                                    ? VF_SCALE_NATIVE1X
                                    : (vf_scale_t)s_set.vf_scale;
-        bool show_frame = vf_scale != VF_SCALE_CROP2X && s_set.frame != 0;
+        /* frame_available(): an SD frame selected in a previous session has no
+         * pixel data to draw until the card's list has loaded (app_frames.h) -
+         * until then this draws the plain viewfinder, then the frame appears. */
+        bool show_frame = vf_scale != VF_SCALE_CROP2X && frame_available(s_set.frame);
         int framed_w = 0, framed_h = 0;
         if (show_frame) {
             const frame_meta_t *fm = frames_get(s_set.frame - 1);
@@ -934,7 +937,10 @@ static void take_photo(void)
             n = storage_ready() ? storage_save_dc(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false, "DC") : -1;
         }
     } else if (s_set.cam_mode == CAM_MODE_GB) {
-        int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
+        /* A photo taken in the second or so the card's frame list is still
+         * loading is saved without its border rather than not at all - the
+         * frame it would have had isn't decoded yet to bake in (app_frames.h). */
+        int frame = frame_available(s_set.frame) ? (int)s_set.frame - 1 : -1;
         if (aeb_shot) {
             n = gb_aeb_capture() > 0 ? 0 : -1;
         } else {
@@ -2167,15 +2173,32 @@ static void gallery_frame(void)
     plat_sleep_ms(20);
 }
 
-/* frames_sd_init()'s progress callback - shown while it's converting a new
- * ROM/pack (the first time only; every boot after that just loads the
- * cached .png, see app_frames_sd.h). */
-static void frames_boot_progress(const char *l1, const char *l2)
+/* frames_sd_start()'s background scan, two things it can't do for itself: it
+ * runs on its own task, so the display stays the main task's to draw (the scan
+ * publishes text, this shows it as an OSD instead of letting another task
+ * touch the panel mid-frame); and the frame list only exists once it
+ * finishes, so the saved frame index can't be checked against it until then.
+ * Both are no-ops once the scan is done. */
+static void frames_boot_status(void)
 {
-    display_begin_blank(0, 0, 0);
-    display_text(DISP_W / 2 - display_text_width(l1, 2) / 2, 100, 2, l1, 255, 255, 255);
-    if (l2) display_text(DISP_W / 2 - display_text_width(l2, 1) / 2, 130, 1, l2, 200, 200, 200);
-    display_end_frame();
+    char l1[40], l2[40];
+    if (frames_sd_status(l1, sizeof l1, l2, sizeof l2)) osd_text(l1, l2[0] ? l2 : NULL);
+}
+
+/* SD content may have changed since s_set.frame was saved, so the saved index
+ * is checked against the finished list - but only once that list exists.
+ * Doing it at boot, the way this used to work, would throw away a perfectly
+ * good SD frame choice and fall back to no frame at all, because the list it
+ * would be checked against is still loading. */
+static void frames_settle(void)
+{
+    static bool settled;
+    if (settled || !frames_sd_ready()) return;
+    settled = true;
+    if (!frame_available(s_set.frame)) {
+        s_set.frame = 0;
+        settings_changed(&s_set);
+    }
 }
 
 /* ------------------------------------------------------------- boot timing */
@@ -2423,8 +2446,12 @@ esp_err_t app_init(void)
      * /ROMS or /PALETTES to scan, so nothing slow follows this that could
      * make the message expire before the live viewfinder is even up. */
     if (!storage_ready()) osd_text("NO SD CARD", NULL);
-    frames_sd_init(frames_boot_progress); /* SD card's /FRAMES and /ROMS, if any - see app_frames_sd.h */
-    if (s_set.frame > (uint8_t)frames_total()) s_set.frame = 0; /* SD content may have changed since this was saved */
+    /* SD card's /FRAMES and /ROMS, if any - backgrounded, so this returns at
+     * once and the viewfinder is up while the card is still being read (see
+     * app_frames_sd.h). The saved frame index is checked against the finished
+     * list later, in frames_settle(), not here - the list is empty here even
+     * on a card full of frames. */
+    frames_sd_start();
     boot_stamp(); /* frames */
 
     palettes_sd_init(); /* SD card's /PALETTES, if any - see app_palettes_sd.h */
@@ -2520,7 +2547,7 @@ static void usb_webcam_feed_screen(void)
 static void usb_webcam_feed_gb(void)
 {
     if (!usb_webcam_active() || s_webcam_mirror) return;
-    if (s_set.frame == 0) {
+    if (!frame_available(s_set.frame)) {
         for (int y = 0; y < GBCAM_H; y++) {
             for (int x = 0; x < GBCAM_W; x++) {
                 const uint8_t *c = gbcam_palette_rgb((gbcam_palette_t)s_set.palette, s_cam->shades[y * GBCAM_W + x]);
@@ -2546,6 +2573,11 @@ static void usb_webcam_feed_gb(void)
 
 void app_step(void)
 {
+    /* The card's frames load in the background (app_frames_sd.h) - both are
+     * one flag read once it's done. */
+    frames_boot_status();
+    frames_settle();
+
     usb_msc_tick();
     if (s_screen == SCREEN_USB && !usb_msc_active()) {
         /* Cable pulled, or the host ejected/released the drive on its own -

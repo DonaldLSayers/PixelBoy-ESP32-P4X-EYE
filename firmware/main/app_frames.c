@@ -38,7 +38,21 @@ void frame_compose_rgb(const frame_meta_t *frame, const uint8_t *shades, gbcam_p
 
 int frames_total(void)
 {
+    /* frames_sd_count() is 0 until the card's frames have finished loading in
+     * the background (app_frames_sd.h) - so this is just the built-ins until
+     * then, which is exactly what every index that has to be valid right now
+     * should be measured against. */
     return FRAME_COUNT + frames_sd_count();
+}
+
+bool frame_available(int frame)
+{
+    /* A 0 (no frame) or an index past the end of the list - which includes
+     * every SD frame while the background load is still running - would hand
+     * frames_get() an entry with no pixel data, and frame_compose_rgb()
+     * dereferences that. Callers that are about to draw or photograph a frame
+     * that may have come from the card ask this first. */
+    return frame > 0 && frame <= frames_total();
 }
 
 const frame_meta_t *frames_get(int index)

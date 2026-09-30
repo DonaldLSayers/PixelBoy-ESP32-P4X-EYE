@@ -316,7 +316,7 @@ esp_err_t storage_init(void)
 
 bool storage_ready(void) { return s_ready; }
 /* SD card mount root (e.g. "/sdcard"), or "" if there's no card - for other
- * SD-backed features (frames_sd_init()'s /frames folder) that need it but
+ * SD-backed features (frames_sd_start()'s /FRAMES folder) that need it but
  * shouldn't mount the card a second time. */
 const char *storage_root(void) { return s_ready ? s_root : ""; }
 int storage_count(void) { return s_count; }
@@ -355,7 +355,12 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
     /* Upscaled PNG in the current palette, framed if requested. */
     int w, h;
     uint8_t *rgb;
-    if (frame >= 0) {
+    /* frame_available(): the caller passes an index into the combined frame
+     * list, and the card's half of it only exists once its background load has
+     * finished (app_frames.h) - frames_get() would otherwise hand back an entry
+     * with no pixel data for frame_compose_rgb() below to walk off the end of.
+     * A frame that isn't loaded yet saves as an unframed photo. */
+    if (frame_available(frame)) {
         const frame_meta_t *fm = frames_get(frame);
         frame_size(fm, PNG_SCALE, &w, &h);
         rgb = malloc((size_t)w * h * 3);
