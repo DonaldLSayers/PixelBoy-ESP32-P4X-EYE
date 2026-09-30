@@ -39,8 +39,32 @@ int app_backlight_percent(void);
 bool app_standby_due(int64_t idle_us);
 bool app_sleep_due(int64_t idle_us);
 
+/* Tell app_enter_sleep() that this sleep is a GB emulator session, so the
+ * resume record points back at this ROM + save slot instead of at whatever
+ * screen is behind it. The one piece of the resume record that can't be read
+ * off app.c's own state, since the emulator is the caller holding it.
+ *
+ * Call it immediately before app_enter_sleep(), and only on the sleep path -
+ * a deliberate exit deletes that slot's .state, so coming back to it would
+ * have nothing to resume anyway. */
+void app_resume_note_gbemu(const char *rom_path, int slot);
+
+/* Whether this iteration's input should be discarded: true from a deep-sleep
+ * GPIO wake until the button that caused it has been seen and released. A wake
+ * is a reset, so the finger that pressed Shutter may still be down when the
+ * resumed screen starts, and an unswallowed Shutter is a photo (or an A press
+ * in a resumed ROM) the user never asked for.
+ *
+ * Call it once per loop iteration and OR it into whatever decides to drop an
+ * event - calling it is what ages the window out, so a loop that only consulted
+ * it inside its drain would swallow the first genuine press minutes later. */
+bool app_boot_swallow_poll(void);
+
 /* Show "SLEEPING", cut camera/LCD/SD/USB power and deep-sleep. Never returns -
  * a wake is a full reset. Callers must have nothing left to lose first: any
  * state they still hold in RAM is gone at this point, which for the emulator
- * means its cart RAM has already been written to the SD card. */
+ * means its cart RAM has already been written to the SD card.
+ *
+ * This is also where the resume record is written (see s_resume in app.c) - the
+ * one choke point every sleep goes through, so a new caller can't forget it. */
 void app_enter_sleep(void);

@@ -14,13 +14,12 @@
  * where the frame-extraction feature archives a ROM once it's scanned it
  * once, untouched and just as playable as the original.
  *
- * gbemu_run() is reached from the real menu (ROW_GBEMU in app.c) or by
- * cycling the Bottom button past DIGICAM (CAM_MODE_EMULATOR in app.c) as a
- * self-contained blocking excursion: it shows a scrollable ROM list (encoder
- * scrolls, Shutter picks, Menu or CamMode cancels back to the camera app),
- * then for a GB Camera ROM a save-slot picker (any number of slots, one
- * .sav each - new photos in a slot auto-export into the regular /GBCAM
- * gallery every time you exit a session using it), then runs the chosen
+ * gbemu_run() is reached by cycling the Bottom button past DIGICAM
+ * (CAM_MODE_EMULATOR in app.c) as a self-contained blocking excursion: it shows
+ * a scrollable ROM list (encoder scrolls, Shutter picks, Menu or CamMode
+ * cancels back to the camera app), then a save-slot picker (any number of
+ * slots, one .sav each - new photos in a slot auto-export into the regular
+ * /GBCAM gallery every time you exit a session using it), then runs the chosen
  * ROM/save.
  *
  * While playing: Shutter is A, Mode is Start (true press/release, both held
@@ -33,3 +32,15 @@
  * button-click switching what the encoder adjusts in the normal camera
  * app). Holding Menu exits back to the camera app. */
 void gbemu_run(void);
+
+/* Run one specific ROM + save slot, skipping both pickers - the deep-sleep
+ * resume path (see app.c's resume record). Returns false, having run nothing,
+ * if there's no SD card or the ROM file is gone; the caller then leaves the
+ * viewfinder up rather than guessing.
+ *
+ * A missing .state is not a failure: run_rom() starts that ROM+slot from its
+ * .sav, exactly as picking it from the slot list would. Whether a state
+ * belongs to this ROM is decided inside gb_state_read() by the ROM's own CRC,
+ * so a stale state from another game (or another build) can't be loaded - it
+ * is discarded instead. */
+bool gbemu_run_rom(const char *rom_path, int slot);

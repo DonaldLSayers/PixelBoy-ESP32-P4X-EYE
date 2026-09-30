@@ -1039,6 +1039,10 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
     int64_t next_sav_flush_us = plat_now_us() + SAV_FLUSH_US;
 
     while (running) {
+        /* Once per iteration, unconditionally: this call is what expires the
+         * wake-touch window, and app.c's loop is not running while this one is
+         * (see app_boot_swallow_poll()). */
+        bool boot_swallow = app_boot_swallow_poll();
         input_event_t ev;
         while (input_get(&ev, 0)) {
             last_input_us = plat_now_us();
@@ -1054,8 +1058,11 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
              * already clear, and Menu's long-press exits the ROM - so waking
              * the game with Menu used to quit it. The next touch acts
              * normally. */
-            if (in_standby || swallow_press) {
-                swallow_press = true;
+            if (in_standby || swallow_press || boot_swallow) {
+                /* Same rule as app_step()'s drain: only the standby case latches
+                 * the flag - the boot window expires by itself, so latching it
+                 * here would swallow past the end of it. */
+                if (in_standby || swallow_press) swallow_press = true;
                 continue;
             }
             if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_MENU) {
@@ -1248,6 +1255,12 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
     rom_teardown(&gb, &ctx, sav_path, true);
 
     if (sleeping) {
+        /* Which ROM and slot this session was, so the boot after the wake can
+         * come straight back into it - app_enter_sleep() writes the resume record
+         * but cannot know any of this by itself (see app.c's s_resume). Only on
+         * this path: a deliberate exit deletes the .state above and has nothing
+         * to resume. */
+        app_resume_note_gbemu(rom_path, slot);
         /* Never returns - the next power-on is a reset, which is why the save
          * had to be written above. The game's last frame is still underneath
          * the SLEEPING message app_enter_sleep() draws. */
@@ -1256,6 +1269,28 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
     }
 
     ESP_LOGW(TAG, "exited");
+}
+
+bool gbemu_run_rom(const char *rom_path, int slot)
+{
+    if (!storage_ready()) {
+        ESP_LOGE(TAG, "no SD card");
+        return false;
+    }
+    /* No scan and no pickers: the path came out of the resume record, so the one
+     * thing that can have changed since is the card itself - the ROM file gone,
+     * or a different card in the slot entirely. run_rom()'s own fopen would
+     * catch that too, but answering before any of the session setup starts is
+     * both cheaper and honest (false means "nothing ran", which is what lets the
+     * caller leave the viewfinder up). */
+    if (!rom_path || !rom_path[0] || !file_exists(rom_path)) {
+        ESP_LOGW(TAG, "rom gone: %s", (rom_path && rom_path[0]) ? rom_path : "(none)");
+        return false;
+    }
+    char sav_path[300];
+    sav_path_for(rom_path, slot, sav_path, sizeof sav_path);
+    run_rom(rom_path, sav_path, slot);
+    return true;
 }
 
 void gbemu_run(void)
