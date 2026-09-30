@@ -1263,13 +1263,11 @@ static void draw_menu(void)
             icons[i] = ICON_AUTO;
             break;
         case ROW_GB_AEB:
-            /* No dedicated icon - reusing AUTO's (both are exposure-related)
-             * rather than adding a new asset for this still-early feature. */
             snprintf(labels[i], sizeof labels[i], "AEB/HDR");
             if (s_set.gb_aeb == 0) snprintf(values[i], sizeof values[i], "OFF");
             else snprintf(values[i], sizeof values[i], "%d SHOTS", s_set.gb_aeb * 2 + 1);
             val = values[i];
-            icons[i] = ICON_AUTO;
+            icons[i] = ICON_HDR;
             break;
         case ROW_DC_PALETTE:
             snprintf(labels[i], sizeof labels[i], "PALETTE");
