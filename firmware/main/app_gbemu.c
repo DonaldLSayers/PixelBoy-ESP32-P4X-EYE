@@ -19,6 +19,7 @@
 
 #include "peanut_gb.h"
 
+#include "app.h"
 #include "app_camera.h"
 #include "app_display.h"
 #include "app_gbemu.h"
@@ -477,6 +478,16 @@ static bool file_exists(const char *path)
 #define GBCAM_SAV_SLOT_BASE 0x2000
 #define GBCAM_SAV_STATE_VECTOR_OFFSET 0x11B2
 
+/* Idle standby for the emulator loop - same intent and thresholds as
+ * app_step()'s IDLE_DIM_US/IDLE_STANDBY_US, repeated here because this loop
+ * never reaches app_step() (see last_input_us in run_rom()). Unlike app_step(),
+ * standby here does NOT touch the camera: a GB Camera ROM's capture task is
+ * still filling cart RAM the whole time, and STREAMOFF under it is the
+ * documented black-viewfinder failure. Only the frame emulation and the
+ * display push stop. */
+#define EMU_STANDBY_US (30 * 1000 * 1000LL)
+#define EMU_STANDBY_POLL_MS 20
+
 /* User-triggered from the ROM list's "PULL NEW PHOTOS" row (see pick_rom()),
  * not automatic on ROM exit - a physical slot number isn't a stable photo
  * identity: gb-photo's own "Clear camera roll" frees every slot for reuse,
@@ -673,6 +684,13 @@ static void run_rom(const char *rom_path, const char *sav_path)
     int64_t osd_until_us = 0; /* non-zero while the axis-toggle message should show, see display_osd() below */
     int64_t left_until_us = 0, right_until_us = 0, up_until_us = 0, down_until_us = 0;
     int64_t a_until_us = 0, b_until_us = 0, select_until_us = 0;
+    /* Idle handling, same shape as app_step()'s (see app_backlight_percent()
+     * in app.c, which supplies the dim level). This loop never returns to
+     * app_step() while a ROM is loaded, so none of that runs here: without
+     * this, setting the device down mid-game would leave the backlight on and
+     * a full Game Boy frame being emulated and pushed at ~60Hz for as long as
+     * the ROM stayed loaded. */
+    int64_t last_input_us = plat_now_us();
     /* gb_run_frame() has no real-time pacing of its own - it just advances
      * emulated game time by exactly one Game Boy frame per call, as fast as
      * it's called. Real hardware runs at DMG_CLOCK_FREQ/SCREEN_REFRESH_
@@ -687,6 +705,7 @@ static void run_rom(const char *rom_path, const char *sav_path)
     while (running) {
         input_event_t ev;
         while (input_get(&ev, 0)) {
+            last_input_us = plat_now_us();
             if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_MENU) {
                 running = false;
             } else if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_CAMMODE) {
@@ -755,6 +774,30 @@ static void run_rom(const char *rom_path, const char *sav_path)
         if (a_until_us && tap_now > a_until_us) { gb.direct.joypad |= JOYPAD_A; a_until_us = 0; }
         if (b_until_us && tap_now > b_until_us) { gb.direct.joypad |= JOYPAD_B; b_until_us = 0; }
         if (select_until_us && tap_now > select_until_us) { gb.direct.joypad |= JOYPAD_SELECT; select_until_us = 0; }
+
+        /* Checked after the input drain and the momentary-tap timers above, so
+         * a button press wakes this in the same iteration it arrives in rather
+         * than one later. */
+        int64_t idle_us = plat_now_us() - last_input_us;
+        bool standby = idle_us > EMU_STANDBY_US;
+        display_set_backlight(standby ? 0 : app_backlight_percent(idle_us));
+        if (standby) {
+            /* Nothing to emulate and nothing to show, so skip the frame
+             * entirely - both gb_run_frame() and the display push below are
+             * the whole cost of this loop. The pacing block further down keeps
+             * next_frame_us where it was, so its existing "behind by more than
+             * a frame" resync is what wakes this back up to real time instead
+             * of a burst of catch-up frames.
+             *
+             * The camera is deliberately left running: a GB Camera ROM's own
+             * capture task (gbcam_emu_task) keeps writing fresh frames into
+             * cart RAM underneath this, and pausing the ISP out from under it
+             * is the exact "viewfinder goes black" failure that keeps the
+             * camera unpaused for the whole emulator session (see
+             * cycle_cam_mode()'s comment in app.c). */
+            plat_sleep_ms(EMU_STANDBY_POLL_MS);
+            continue;
+        }
 
         gb_run_frame(&gb);
         vTaskDelay(1); /* safety net for the watchdog task's own feed */

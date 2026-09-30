@@ -139,3 +139,5 @@ bool input_get(input_event_t *ev, uint32_t timeout_ms)
 {
     return xQueueReceive(s_queue, ev, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
+
+bool input_pending(void) { return uxQueueMessagesWaiting(s_queue) > 0; }

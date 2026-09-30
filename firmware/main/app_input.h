@@ -45,3 +45,8 @@ esp_err_t input_init(void);
 
 /* Wait up to timeout_ms for the next event. Returns false on timeout. */
 bool input_get(input_event_t *ev, uint32_t timeout_ms);
+
+/* Is an event already waiting? Lets a caller that isn't ready to consume the
+ * queue yet still know the user has done something - see app_step()'s use of
+ * this to leave backlight standby before it dispatches what it just found. */
+bool input_pending(void);

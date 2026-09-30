@@ -1039,15 +1039,96 @@ static void truncate_value(char *out, const char *in)
 #define IDLE_DIM_US (20 * 1000 * 1000LL)
 #define IDLE_DIM_PERCENT 15
 
+/* Defined with the rest of the standby state below - update_backlight() only
+ * needs to know whether the screen is meant to be out at all. */
+static bool s_standby;
+
+/* The dim half of that policy, and the only part app_gbemu.c shares (see
+ * app.h) - the emulator's own loop never gets back to app_step() while a ROM
+ * is loaded, so without it a play session would hold the screen at full
+ * brightness forever. Never returns 0; full-off belongs to whichever loop is
+ * doing the standby (app_step() also stops the camera, the emulator doesn't).
+ *
+ * Takes idle_us rather than reading this file's own s_last_input_us, because
+ * the emulator tracks its idle time separately - there is no one shared
+ * clock behind both loops. */
+int app_backlight_percent(int64_t idle_us)
+{
+    int want = BACKLIGHT_PERCENT[s_set.backlight];
+    if (idle_us > IDLE_DIM_US && want > IDLE_DIM_PERCENT) want = IDLE_DIM_PERCENT;
+    return want;
+}
+
 /* Idempotent and cheap to call every app_step(): display_hw_set_backlight()
  * ignores a value it's already at, so an un-dimmed viewfinder doesn't retouch
  * the LEDC duty (or its INFO log) 15 times a second. */
 static void update_backlight(void)
 {
-    int want = BACKLIGHT_PERCENT[s_set.backlight];
-    if (now_us() - s_last_input_us > IDLE_DIM_US && want > IDLE_DIM_PERCENT)
-        want = IDLE_DIM_PERCENT;
-    display_set_backlight(want);
+    display_set_backlight(s_standby ? 0 : app_backlight_percent(now_us() - s_last_input_us));
+}
+
+/* ---------------------------------------------------------------- standby */
+
+/* A second, deeper idle step past the dim above: the backlight goes out
+ * completely and, in the viewfinder, the camera stops streaming. Those are
+ * the two biggest continuous loads on the board - the sensor/MIPI/ISP chain
+ * especially, which runs at its own 25fps regardless of how few frames this
+ * app actually consumes - and both are pure waste when nobody has touched the
+ * thing for half a minute.
+ *
+ * Deliberately not deep sleep: that's a full reset on wake (see
+ * plat_enter_deep_sleep()), so anything reached from here has to come back
+ * without a reboot. camera_pause()/camera_resume() are exactly that - a
+ * V4L2 STREAMOFF/STREAMON of buffers the driver already owns - so the cost of
+ * waking is the ISP's own restart plus whatever the auto-exposure does
+ * converging again, not a boot. It's also why this is a separate, much
+ * earlier threshold than ROW_SLEEP's: it's meant to be entered and left
+ * constantly, not to be a one-way trip.
+ *
+ * 30s sits between IDLE_DIM_US (20s) and the shortest ROW_SLEEP timeout
+ * (1 min), so the ordering is always dim -> standby -> sleep. */
+#define IDLE_STANDBY_US (30 * 1000 * 1000LL)
+#define STANDBY_POLL_MS 20
+
+/* Whether *this* stopped the camera, as opposed to finding it already stopped
+ * by a screen that manages it itself (enter_menu()/enter_gallery()). Only a
+ * pause we made is ours to undo - without this, leaving standby from the
+ * gallery would camera_resume() behind enter_gallery()'s back. */
+static bool s_standby_paused_camera;
+
+/* Screens that are being watched from somewhere other than this device:
+ * handing the SD card to a PC (the host is driving that screen), the WiFi
+ * gallery (a phone may be mid-download), and USB mirror mode (a host is
+ * capturing the screen - blanking it would blank the stream). Same set
+ * app_step()'s auto-sleep check excludes, for the same reasons. */
+static bool standby_allowed(void)
+{
+    if (usb_webcam_active()) return false;
+    return s_screen != SCREEN_USB && s_screen != SCREEN_WIFI;
+}
+
+/* Time-based only - a pending input event has already been folded into
+ * s_last_input_us by the time app_step() calls this (see there), which is
+ * what makes leaving standby happen before the event that caused it gets
+ * dispatched. */
+static void update_standby(void)
+{
+    bool want = now_us() - s_last_input_us > IDLE_STANDBY_US && standby_allowed();
+    if (want == s_standby) return;
+
+    if (want) {
+        if (s_screen == SCREEN_VIEWFINDER) {
+            camera_pause();
+            s_standby_paused_camera = true;
+        }
+        s_standby = true;
+    } else {
+        if (s_standby_paused_camera) {
+            camera_resume();
+            s_standby_paused_camera = false;
+        }
+        s_standby = false;
+    }
 }
 
 static void build_menu(void)
@@ -2095,6 +2176,17 @@ void app_step(void)
         s_screen = SCREEN_VIEWFINDER;
     }
 
+    /* An event that's already waiting counts as activity now, before it gets
+     * dispatched below: both update_backlight() and update_standby() read
+     * s_last_input_us, and leaving standby has to have happened by the time an
+     * event like "open the menu" runs its own camera_pause() - reacting a step
+     * later would dispatch that press with the camera still stopped and the
+     * screen still dark, and standby's own camera_resume() would then undo the
+     * pause enter_menu() just made. */
+    if (input_pending()) s_last_input_us = now_us();
+    update_standby();
+    update_backlight();
+
     input_event_t ev;
     while (input_get(&ev, 0)) {
         s_last_input_us = now_us();
@@ -2105,10 +2197,6 @@ void app_step(void)
         else handle_gallery_input(&ev);
     }
 
-    /* After the input drain above, so a fresh event clears the idle window in
-     * the same step it arrived in - see update_backlight(). */
-    update_backlight();
-
     /* Not while the SD card's handed to a PC (s_screen==SCREEN_USB implies
      * usb_msc_active(), given app_step()'s own check above) - cutting power
      * mid-transfer would be a bad surprise, not just an inconvenience. Same
@@ -2118,6 +2206,18 @@ void app_step(void)
     int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
     if (sleep_min != 0 && s_screen != SCREEN_USB && s_screen != SCREEN_WIFI && !usb_webcam_active() &&
         now_us() - s_last_input_us > (int64_t)sleep_min * 60 * 1000000LL) enter_sleep();
+
+    /* Nothing to draw and nothing to capture - the camera is stopped and the
+     * backlight is out (see update_standby()). Sleep a whole poll interval
+     * rather than running the frame path, which in the viewfinder would just
+     * fail camera_grab() and sleep 10ms itself on every pass. Input arrives
+     * through its own queue, so the next event still wakes this promptly on
+     * the following iteration. */
+    if (s_standby) {
+        plat_sleep_ms(STANDBY_POLL_MS);
+        settings_tick();
+        return;
+    }
 
     if (s_screen == SCREEN_GALLERY) gallery_frame();
     else if (s_screen == SCREEN_USB) usb_screen_frame();
