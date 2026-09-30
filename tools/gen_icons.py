@@ -37,6 +37,11 @@ ICONS = [
     ("ICON_AUTO", "auto"),
     ("ICON_EDGE", "edge"),
     ("ICON_WIFI", "wifi"),
+    # Appended, not slotted in next to ICON_SLEEP where they'd read better -
+    # the docstring's rule is that existing ids never move.
+    ("ICON_BACKLIGHT", "brightness"),
+    ("ICON_STANDBY", "standby"),
+    ("ICON_HDR", "hdr"),
 ]
 
 

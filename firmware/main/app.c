@@ -1320,13 +1320,12 @@ static void draw_menu(void)
         case ROW_BACKLIGHT:
             /* "BACKLIGHT", not "BRIGHTNESS" - that name is already taken by the
              * viewfinder's own quick-adjust (the GB Camera's emulated exposure,
-             * a pixel-level effect), and the two are easy to confuse. Reuses
-             * the SLEEP icon rather than adding a new generated asset for one
-             * row - same trade-off ROW_GB_AEB makes with ICON_AUTO. */
+             * a pixel-level effect), and the two are easy to confuse. The icon
+             * asset is brightness.png all the same (see tools/gen_icons.py). */
             snprintf(labels[i], sizeof labels[i], "BACKLIGHT");
             snprintf(values[i], sizeof values[i], "%d%%", BACKLIGHT_PERCENT[s_set.backlight]);
             val = values[i];
-            icons[i] = ICON_SLEEP;
+            icons[i] = ICON_BACKLIGHT;
             break;
         case ROW_STANDBY:
             /* "STANDBY" rather than "SCREEN OFF": this also stops the camera,
@@ -1337,7 +1336,7 @@ static void draw_menu(void)
             snprintf(labels[i], sizeof labels[i], "STANDBY");
             snprintf(values[i], sizeof values[i], "%s", STANDBY_LABELS[s_set.standby]);
             val = values[i];
-            icons[i] = ICON_SLEEP;
+            icons[i] = ICON_STANDBY;
             break;
         case ROW_SLEEP:
             snprintf(labels[i], sizeof labels[i], "SLEEP");
