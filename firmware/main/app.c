@@ -922,7 +922,7 @@ static void take_photo(void)
     if (n < 0) osd_text("SAVE FAILED", NULL);
 }
 
-static void enter_sleep(void)
+void app_enter_sleep(void)
 {
     display_begin_blank(0, 0, 0);
     display_text(DISP_W / 2 - display_text_width("SLEEPING", 3) / 2, 100, 3, "SLEEPING", 255, 255, 255);
@@ -1096,6 +1096,22 @@ bool app_standby_due(int64_t idle_us)
 {
     int64_t sb = standby_us();
     return sb != 0 && idle_us > sb;
+}
+
+/* The SLEEP timer (ROW_SLEEP), which deep-sleeps rather than just darkening.
+ * sleep_min of 0 means "never" (see the row), not an instant sleep.
+ *
+ * The exemptions are the whole reason this lives here instead of in each
+ * loop: nothing should cut power while a PC owns the SD card (mid-transfer),
+ * while the WiFi gallery could be mid-download, or while mirror mode is
+ * streaming the very screen that would go blank - and the emulator loop has
+ * no way to know about any of those on its own (it never calls
+ * usb_msc_tick(), so it wouldn't even notice the cable). */
+bool app_sleep_due(int64_t idle_us)
+{
+    int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
+    return sleep_min != 0 && s_screen != SCREEN_USB && s_screen != SCREEN_WIFI && !usb_webcam_active() &&
+           idle_us > (int64_t)sleep_min * 60 * 1000000LL;
 }
 
 /* Idempotent and cheap to call every app_step(): display_hw_set_backlight()
@@ -2268,15 +2284,10 @@ void app_step(void)
         else handle_gallery_input(&ev);
     }
 
-    /* Not while the SD card's handed to a PC (s_screen==SCREEN_USB implies
-     * usb_msc_active(), given app_step()'s own check above) - cutting power
-     * mid-transfer would be a bad surprise, not just an inconvenience. Same
-     * for mirror mode - sleeping would blank the very screen it's streaming.
-     * Same for the WiFi gallery - a phone could be mid-download. sleep_min
-     * of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
-    int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
-    if (sleep_min != 0 && s_screen != SCREEN_USB && s_screen != SCREEN_WIFI && !usb_webcam_active() &&
-        now_us() - s_last_input_us > (int64_t)sleep_min * 60 * 1000000LL) enter_sleep();
+    /* Why this fires and when it deliberately doesn't: see app_sleep_due().
+     * Nothing to tear down here - app_step() owns no state that doesn't
+     * survive being reset - so it goes straight to sleep. */
+    if (app_sleep_due(now_us() - s_last_input_us)) app_enter_sleep();
 
     /* Nothing to draw and nothing to capture - the camera is stopped and the
      * backlight is out (see update_standby()). Sleep a whole poll interval

@@ -26,6 +26,20 @@ void app_step(void);
  * must not - see run_rom()'s standby block).
  *
  * app_standby_due() says whether that much idle has crossed the user's own
- * standby timeout (ROW_STANDBY; false when it's set to NEVER). */
+ * standby timeout (ROW_STANDBY; false when it's set to NEVER).
+ *
+ * app_sleep_due() is the other half of idle - the SLEEP timer (ROW_SLEEP),
+ * which deep-sleeps the device rather than just darkening it. Unlike standby,
+ * which each loop decides for itself, this one has to be a shared decision:
+ * for the emulator it is not just a matter of stopping a loop but of tearing
+ * the ROM down first (see run_rom()), so the caller passes the verdict on to
+ * app_enter_sleep() only after it has finished with its own state. */
 int app_backlight_percent(int64_t idle_us);
 bool app_standby_due(int64_t idle_us);
+bool app_sleep_due(int64_t idle_us);
+
+/* Show "SLEEPING", cut camera/LCD/SD/USB power and deep-sleep. Never returns -
+ * a wake is a full reset. Callers must have nothing left to lose first: any
+ * state they still hold in RAM is gone at this point, which for the emulator
+ * means its cart RAM has already been written to the SD card. */
+void app_enter_sleep(void);
