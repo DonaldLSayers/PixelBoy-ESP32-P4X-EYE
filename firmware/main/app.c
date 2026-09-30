@@ -141,6 +141,7 @@ typedef enum {
     ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
     ROW_BACKLIGHT,
+    ROW_STANDBY,
     ROW_SLEEP,
     ROW_GALLERY, ROW_WIFI, ROW_EXIT
 } menu_row_t;
@@ -156,7 +157,7 @@ static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
  * that's useless in daylight. */
 static const int BACKLIGHT_PERCENT[BACKLIGHT_OPTIONS_COUNT] = {25, 50, 75, 100};
 
-static menu_row_t s_menu_rows[12]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 5 shared rows */
+static menu_row_t s_menu_rows[13]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 6 shared rows */
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -1039,24 +1040,62 @@ static void truncate_value(char *out, const char *in)
 #define IDLE_DIM_US (20 * 1000 * 1000LL)
 #define IDLE_DIM_PERCENT 15
 
+/* Auto-standby timeout choices - see STANDBY_OPTIONS_COUNT in app_settings.h
+ * and ROW_STANDBY below - 0 = never. Not deep sleep: standby is the cheap,
+ * instantly-reversible tier (screen out, camera stopped, straight back on the
+ * next press), so having it user-tunable is reasonable in a way the one-way
+ * ROW_SLEEP trip isn't. It does mean the pair can be set in either order; the
+ * only consequence of a sleep timeout shorter than this one is that the
+ * standby state is never reached, which costs nothing. */
+static const int STANDBY_SECONDS[STANDBY_OPTIONS_COUNT] = {0, 15, 30, 60, 120, 300};
+/* The same values again for the menu to print (see ROW_STANDBY in draw_menu())
+ * - spelled out rather than formatted from STANDBY_SECONDS[] so the row reads
+ * "1 MIN" and not "60 SEC"; keep the two in step. */
+static const char *const STANDBY_LABELS[STANDBY_OPTIONS_COUNT] = {"NEVER", "15 SEC", "30 SEC", "1 MIN", "2 MIN", "5 MIN"};
+
 /* Defined with the rest of the standby state below - update_backlight() only
  * needs to know whether the screen is meant to be out at all. */
 static bool s_standby;
 
-/* The dim half of that policy, and the only part app_gbemu.c shares (see
- * app.h) - the emulator's own loop never gets back to app_step() while a ROM
- * is loaded, so without it a play session would hold the screen at full
- * brightness forever. Never returns 0; full-off belongs to whichever loop is
- * doing the standby (app_step() also stops the camera, the emulator doesn't).
+/* "Never" as far as the two functions below are concerned, and a guard for the
+ * dim threshold further down: a sentinel rather than 0 because 0 is itself a
+ * meaningful entry in STANDBY_SECONDS[] (never), not "unset". */
+static int64_t standby_us(void)
+{
+    int sec = STANDBY_SECONDS[s_set.standby];
+    return sec == 0 ? 0 : (int64_t)sec * 1000000LL;
+}
+
+/* The dim half of that policy, shared with app_gbemu.c (see app.h). Never
+ * returns 0; full-off belongs to whichever loop is doing the standby
+ * (app_step() also stops the camera, the emulator doesn't).
  *
  * Takes idle_us rather than reading this file's own s_last_input_us, because
  * the emulator tracks its idle time separately - there is no one shared
  * clock behind both loops. */
 int app_backlight_percent(int64_t idle_us)
 {
+    int64_t dim_us = IDLE_DIM_US;
+    /* With standby tuned shorter than the fixed dim delay, dimming first would
+     * mean flickering through a level nobody ever sees - 15 SEC standby would
+     * dim at 20s, five seconds after the screen was already out. Pull the dim
+     * in to stay clear of it instead (5s of dim, then the screen out), and
+     * leave the 20s delay alone whenever standby is comfortably later or off. */
+    int64_t sb = standby_us();
+    if (sb != 0 && sb - dim_us < 5000000LL) dim_us = sb - 5000000LL;
+
     int want = BACKLIGHT_PERCENT[s_set.backlight];
-    if (idle_us > IDLE_DIM_US && want > IDLE_DIM_PERCENT) want = IDLE_DIM_PERCENT;
+    if (idle_us > dim_us && want > IDLE_DIM_PERCENT) want = IDLE_DIM_PERCENT;
     return want;
+}
+
+/* The timeout half of that policy, shared with app_gbemu.c (see app.h). The
+ * standby state itself is each loop's own business - what app_step() does
+ * about it (stop the camera) is not what the emulator does (leave it alone). */
+bool app_standby_due(int64_t idle_us)
+{
+    int64_t sb = standby_us();
+    return sb != 0 && idle_us > sb;
 }
 
 /* Idempotent and cheap to call every app_step(): display_hw_set_backlight()
@@ -1085,9 +1124,9 @@ static void update_backlight(void)
  * earlier threshold than ROW_SLEEP's: it's meant to be entered and left
  * constantly, not to be a one-way trip.
  *
- * 30s sits between IDLE_DIM_US (20s) and the shortest ROW_SLEEP timeout
- * (1 min), so the ordering is always dim -> standby -> sleep. */
-#define IDLE_STANDBY_US (30 * 1000 * 1000LL)
+ * The timeout itself is the user's (ROW_STANDBY, see app_standby_due()) and
+ * defaults to 30s, which sits between IDLE_DIM_US (20s) and the shortest
+ * ROW_SLEEP timeout (1 min). */
 #define STANDBY_POLL_MS 20
 
 /* Whether *this* stopped the camera, as opposed to finding it already stopped
@@ -1113,7 +1152,7 @@ static bool standby_allowed(void)
  * dispatched. */
 static void update_standby(void)
 {
-    bool want = now_us() - s_last_input_us > IDLE_STANDBY_US && standby_allowed();
+    bool want = app_standby_due(now_us() - s_last_input_us) && standby_allowed();
     if (want == s_standby) return;
 
     if (want) {
@@ -1153,6 +1192,7 @@ static void build_menu(void)
         s_menu_rows[s_menu_count++] = ROW_NORMAL_SIZE;
     }
     s_menu_rows[s_menu_count++] = ROW_BACKLIGHT;
+    s_menu_rows[s_menu_count++] = ROW_STANDBY;
     s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
     s_menu_rows[s_menu_count++] = ROW_WIFI;
@@ -1172,11 +1212,12 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
-    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 5 shared rows
-     * (Backlight/Sleep/Gallery/WiFi/Exit) = 12, the largest any mode builds. */
-    char labels[12][13], values[12][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
-    const char *label_ptrs[12], *value_ptrs[12];
-    icon_id_t icons[12];
+    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 6 shared rows
+     * (Backlight/Standby/Sleep/Gallery/WiFi/Exit) = 13, the largest any mode
+     * builds. */
+    char labels[13][13], values[13][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
+    const char *label_ptrs[13], *value_ptrs[13];
+    icon_id_t icons[13];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
@@ -1284,6 +1325,17 @@ static void draw_menu(void)
              * row - same trade-off ROW_GB_AEB makes with ICON_AUTO. */
             snprintf(labels[i], sizeof labels[i], "BACKLIGHT");
             snprintf(values[i], sizeof values[i], "%d%%", BACKLIGHT_PERCENT[s_set.backlight]);
+            val = values[i];
+            icons[i] = ICON_SLEEP;
+            break;
+        case ROW_STANDBY:
+            /* "STANDBY" rather than "SCREEN OFF": this also stops the camera,
+             * not just the panel, and it's the word the code and the comments
+             * here already use. The value column carries the seconds, which is
+             * what actually distinguishes it from SLEEP below - the two rows
+             * sit together so they read as the two halves of one policy. */
+            snprintf(labels[i], sizeof labels[i], "STANDBY");
+            snprintf(values[i], sizeof values[i], "%s", STANDBY_LABELS[s_set.standby]);
             val = values[i];
             icons[i] = ICON_SLEEP;
             break;
@@ -1397,6 +1449,15 @@ static void activate_menu_row(void)
          * menu the moment it's picked. update_backlight() won't undo it: the
          * Shutter press that got here already refreshed s_last_input_us, so
          * the idle window is nowhere near elapsed. */
+        update_backlight();
+        break;
+    case ROW_STANDBY:
+        s_set.standby = (uint8_t)((s_set.standby + 1) % STANDBY_OPTIONS_COUNT);
+        settings_changed(&s_set);
+        /* Same as ROW_BACKLIGHT: the Shutter press that got here just refreshed
+         * s_last_input_us, so a shorter timeout can't fire out from under the
+         * menu the moment it's picked. */
+        update_standby();
         update_backlight();
         break;
     case ROW_SLEEP:
@@ -2183,6 +2244,7 @@ void app_step(void)
      * later would dispatch that press with the camera still stopped and the
      * screen still dark, and standby's own camera_resume() would then undo the
      * pause enter_menu() just made. */
+    bool was_standby = s_standby;
     if (input_pending()) s_last_input_us = now_us();
     update_standby();
     update_backlight();
@@ -2190,6 +2252,13 @@ void app_step(void)
     input_event_t ev;
     while (input_get(&ev, 0)) {
         s_last_input_us = now_us();
+        /* Consumed to wake the screen, not dispatched: standby is entered by
+         * doing nothing, so whatever was pressed into it was asking to see the
+         * screen again, not asking for what that button does - and the live
+         * Shutter lands as a photo of a viewfinder the user couldn't see to
+         * frame. Same discard as the emulator loop's (see in_standby in
+         * app_gbemu.c's run_rom()). The next press acts normally. */
+        if (was_standby) continue;
         if (s_screen == SCREEN_USB) handle_usb_input(&ev);
         else if (s_screen == SCREEN_VIEWFINDER) handle_viewfinder_input(&ev);
         else if (s_screen == SCREEN_MENU) handle_menu_input(&ev);

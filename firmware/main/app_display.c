@@ -585,7 +585,8 @@ void display_menu(const char *title, const char *const *labels, const char *cons
      * space between three widely spaced lines. Rows pack from the top; any
      * leftover height on a shorter menu just stays black. A menu longer than
      * that scrolls, keeping the selected row in view (GB Camera's own menu
-     * is the one that needs it, at 8 rows since ROW_SLEEP was added). */
+     * is the one that needs it, at 13 rows since ROW_BACKLIGHT/ROW_STANDBY
+     * were added - see build_menu() in app.c). */
     int rows_top = y + 30, rows_h = h - 30 - 6;
     int row_h = rows_h / MENU_MAX_VISIBLE;
     /* Stays put until the selection would run off the bottom of the visible

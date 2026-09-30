@@ -478,14 +478,15 @@ static bool file_exists(const char *path)
 #define GBCAM_SAV_SLOT_BASE 0x2000
 #define GBCAM_SAV_STATE_VECTOR_OFFSET 0x11B2
 
-/* Idle standby for the emulator loop - same intent and thresholds as
- * app_step()'s IDLE_DIM_US/IDLE_STANDBY_US, repeated here because this loop
- * never reaches app_step() (see last_input_us in run_rom()). Unlike app_step(),
- * standby here does NOT touch the camera: a GB Camera ROM's capture task is
- * still filling cart RAM the whole time, and STREAMOFF under it is the
- * documented black-viewfinder failure. Only the frame emulation and the
- * display push stop. */
-#define EMU_STANDBY_US (30 * 1000 * 1000LL)
+/* Idle standby for the emulator loop. The level and the timeout both come
+ * from app.c's shared policy (app_backlight_percent()/app_standby_due(), see
+ * app.h) rather than being repeated here, so ROW_BACKLIGHT and ROW_STANDBY
+ * mean the same thing in a game as in the viewfinder - this loop never reaches
+ * app_step(), which is the only other place either setting is read. Unlike
+ * app_step(), standby here does NOT touch the camera: a GB Camera ROM's
+ * capture task is still filling cart RAM the whole time, and STREAMOFF under
+ * it is the documented black-viewfinder failure. Only the frame emulation and
+ * the display push stop. */
 #define EMU_STANDBY_POLL_MS 20
 
 /* User-triggered from the ROM list's "PULL NEW PHOTOS" row (see pick_rom()),
@@ -701,11 +702,22 @@ static void run_rom(const char *rom_path, const char *sav_path)
      * nothing was pacing gb_run_frame() itself. */
     const int64_t frame_period_us = (int64_t)(1000000.0 * SCREEN_REFRESH_CYCLES / DMG_CLOCK_FREQ);
     int64_t next_frame_us = plat_now_us();
+    /* Set by the standby block at the bottom of the loop and read by the drain
+     * just below, which is why it lives out here rather than in either one -
+     * see the discard there. */
+    bool in_standby = false;
     bool running = true;
     while (running) {
         input_event_t ev;
         while (input_get(&ev, 0)) {
             last_input_us = plat_now_us();
+            /* A press made while the screen is out is spent waking it, not
+             * handed to the game: standby is entered by doing nothing, so
+             * nothing pressed into it was aimed at the game, and Shutter is
+             * the one that bites - it wakes the screen and takes the photo on
+             * the same frame, in a game you can't see yet. The next press
+             * behaves normally. */
+            if (in_standby) continue;
             if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_MENU) {
                 running = false;
             } else if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_CAMMODE) {
@@ -779,7 +791,8 @@ static void run_rom(const char *rom_path, const char *sav_path)
          * a button press wakes this in the same iteration it arrives in rather
          * than one later. */
         int64_t idle_us = plat_now_us() - last_input_us;
-        bool standby = idle_us > EMU_STANDBY_US;
+        bool standby = app_standby_due(idle_us);
+        in_standby = standby;
         display_set_backlight(standby ? 0 : app_backlight_percent(idle_us));
         if (standby) {
             /* Nothing to emulate and nothing to show, so skip the frame

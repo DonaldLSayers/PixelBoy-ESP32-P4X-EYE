@@ -44,14 +44,22 @@ typedef struct {
                      * near-total white/black) - see gb_aeb_capture() in app.c. */
     uint8_t backlight; /* index into app.c's BACKLIGHT_PERCENT[], BACKLIGHT_OPTIONS_COUNT entries -
                         * the LCD backlight's own duty, nothing to do with `brightness` above
-                        * (that one is the GB Camera's emulated exposure, a pixel-level effect).
-                        * Last field on purpose: app_settings.c's load is size-tolerant and only
-                        * defaults the tail it didn't get, so appending here keeps an older saved
-                        * blob loading rather than failing settings_valid(). */
+                        * (that one is the GB Camera's emulated exposure, a pixel-level effect). */
+    uint8_t standby; /* index into app.c's STANDBY_SECONDS[], STANDBY_OPTIONS_COUNT entries; value 0
+                      * = never. How long with no input before the screen goes dark and the camera
+                      * stops - the cheap, instantly-reversible tier (see app.c's standby section);
+                      * `sleep_min` above is the deep-sleep timer that reboots on wake. Independent
+                      * of it on purpose: the worst any combination can do is skip a tier (a sleep
+                      * timeout shorter than the standby one just never shows the standby state),
+                      * which is harmless, so neither has to be clamped to the other.
+                      * Last field on purpose: app_settings.c's load is size-tolerant and only
+                      * defaults the tail it didn't get, so appending here keeps an older saved
+                      * blob loading rather than failing settings_valid(). */
 } app_settings_t;
 
 #define SLEEP_OPTIONS_COUNT 6
 #define BACKLIGHT_OPTIONS_COUNT 4
+#define STANDBY_OPTIONS_COUNT 6
 
 /* app_settings_common.c - no board-specific logic, just defaults/validation. */
 void settings_defaults(app_settings_t *s);
