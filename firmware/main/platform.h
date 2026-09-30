@@ -25,7 +25,9 @@ esp_err_t plat_storage_mount(char *root, size_t len);
 int plat_mkdir(const char *path);
 
 /* Battery charge, 0..100, or -1 if there's no battery/gauge to read (a board
- * run purely on USB power with nothing plugged into the battery header). */
+ * run purely on USB power with nothing plugged into the battery header).
+ * Cached/smoothed internally on a few-second refresh - safe to call every
+ * frame without hammering the ADC or jittering the displayed number. */
 int plat_battery_percent(void);
 
 /* Cuts power to the camera/LCD/SD card and puts the chip into deep sleep,
