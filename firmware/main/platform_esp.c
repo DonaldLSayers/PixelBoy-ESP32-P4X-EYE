@@ -12,6 +12,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 
+#include "app_display.h"
 #include "app_input.h"
 #include "app_usb.h"
 #include "app_wifi_gallery.h"
@@ -156,14 +157,23 @@ void plat_enter_deep_sleep(void)
     /* Everything below only makes sense while a rail is still up, so the order
      * here is the order things stop working in, not an arbitrary one.
      *
-     * The panel and its backlight are the visible half of this: bsp_display_
-     * enter_sleep() is the BSP's own "you're about to lose power" call (panel
-     * sleep-in command, backlight off). Cutting BSP_LCD_EN below probably
-     * takes the whole rail with it, but "probably" isn't worth leaving a
-     * backlight driver latched at whatever duty the last frame left it at -
-     * and if the backlight boost turns out not to be on that rail at all,
-     * this is the difference between a dark screen and a lit one all night. */
-    bsp_display_enter_sleep();
+     * The panel and its backlight are the visible half of this: display_sleep()
+     * is the "you're about to lose power" call (panel sleep-in command,
+     * backlight off). Cutting BSP_LCD_EN below probably takes the whole rail
+     * with it, but "probably" isn't worth leaving a backlight driver latched at
+     * whatever duty the last frame left it at - and if the backlight boost
+     * turns out not to be on that rail at all, this is the difference between a
+     * dark screen and a lit one all night.
+     *
+     * Deliberately NOT the BSP's own bsp_display_enter_sleep(), which is the
+     * obvious-looking call here: it works off panel_handle, the BSP's private
+     * panel set up by its LVGL bsp_display_start_with_config() - and this app
+     * never calls that, it builds its own ST7789 in display_hw_esp.c. So
+     * panel_handle is still NULL and the BSP's assert(panel_handle) fires on
+     * the way in, i.e. abort(): the board rebooted instead of sleeping. That
+     * was this sleep path's one real bug - "goes into deep sleep and comes
+     * right back on", with no sleep ever happening. */
+    display_sleep();
 
     /* The USB PHY, unlike the rails below, has no enable pin to cut - only
      * the driver keeps it alive, so it has to be told to let go (see

@@ -143,7 +143,12 @@ void display_end_frame(void);
  * (see usb_webcam_feed() in app_usb.h) - not needed for normal rendering. */
 const uint16_t *display_last_frame(void);
 
-/* Panel backlight duty, 0..100 (%) - the app's idle-dim and its BACKLIGHT
- * setting both go through here (see update_backlight()/ROW_BACKLIGHT in
- * app.c). Pixel content is untouched: this is only the LED behind the panel. */
+/* Panel backlight duty, 0..100 (%) - the BACKLIGHT setting and standby both go
+ * through here (see update_backlight()/ROW_BACKLIGHT in app.c). Pixel content
+ * is untouched: this is only the LED behind the panel. */
 void display_set_backlight(int percent);
+
+/* Panel sleep-in and backlight off, for the walk into deep sleep only - the
+ * last display call before the rail is cut. Like everything else on that path
+ * it has no counterpart: a wake is a full reset. */
+void display_sleep(void);
