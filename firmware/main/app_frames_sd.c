@@ -150,10 +150,53 @@ static void write_frame_png(const char *file_stem, int w, int h, const uint8_t *
  * the initial scan (PNG sources decode fully up front, to dedupe by pixel
  * content) and frames_sd_get()'s on-demand reload of whichever frame is
  * currently selected. */
+/* A PNG's bytes, read in one go.
+ *
+ * stb_image's own file path pulls the stream through stbi__get8(), i.e. one
+ * byte per fread() - and every one of those is a VFS lock plus a FatFs call
+ * here, so a 160x144 frame's ~20 KB of PNG stream cost ~16ms to decode and 73
+ * of them was over a second of boot (measured: 1072ms of the 1567ms /FRAMES
+ * scan). Handing stb_image the whole file as memory instead is one read and
+ * decodes byte-identically.
+ *
+ * The cap is a guard, not a format limit: a frame past it falls back to the
+ * streaming path rather than being refused or allocated blind. */
+#define PNG_IN_MEMORY_MAX (512 * 1024)
+
+static uint8_t *read_file_to_mem(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = (len > 0 && len <= PNG_IN_MEMORY_MAX) ? malloc((size_t)len) : NULL;
+    if (buf && fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf);
+        buf = NULL;
+    }
+    fclose(f);
+    if (buf) *out_len = (size_t)len;
+    return buf;
+}
+
+/* TEMPORARY boot-timing probe - the three numbers frames_sd_init() prints
+ * below. Remove with them. */
+int64_t s_probe_read_us, s_probe_decode_us;
+
 static uint8_t *decode_png_to_indices(const char *path, int *out_w, int *out_h, int *out_photo_y)
 {
     int w, h, comp;
-    uint8_t *rgba = stbi_load(path, &w, &h, &comp, 4);
+    size_t blob_len = 0;
+    int64_t tp0 = plat_now_us();
+    uint8_t *blob = read_file_to_mem(path, &blob_len);
+    int64_t tp1 = plat_now_us();
+    uint8_t *rgba = blob ? stbi_load_from_memory(blob, (int)blob_len, &w, &h, &comp, 4)
+                         : stbi_load(path, &w, &h, &comp, 4);
+    int64_t tp2 = plat_now_us();
+    s_probe_read_us += tp1 - tp0;
+    s_probe_decode_us += tp2 - tp1;
+    free(blob);
     if (!rgba) {
         PLOGW(TAG, "%s: not a readable PNG", path);
         return NULL;
@@ -292,14 +335,24 @@ static bool add_frame_persist(const char *name, const char *file_stem, int w, in
 
 /* ---------------------------------------------------------------- PNG in */
 
+/* TEMPORARY boot-timing probe - see frames_sd_init(). Remove once the boot
+ * budget question is settled. */
+static int64_t s_probe_png_us;
+static int s_probe_png_n;
+
 static void load_png(const char *path, const char *stem)
 {
+    int64_t t0 = plat_now_us();
     int w, h, photo_y;
     uint8_t *indices = decode_png_to_indices(path, &w, &h, &photo_y);
     if (!indices) return;
     /* The filename itself is the display name (write_frame_png() names the
      * cache file that way already) - no separate sidecar to check. */
     add_frame_from_file(stem, path, w, h, photo_y, indices);
+    int64_t dt = plat_now_us() - t0;
+    s_probe_png_us += dt;
+    s_probe_png_n++;
+    if (dt > 20000) PLOGW(TAG, "TEMP png %s %lldms", stem, (long long)(dt / 1000));
 }
 
 /* --------------------------------------------------------- JSON pack in */
@@ -1184,12 +1237,23 @@ void frames_sd_init(frames_sd_progress_cb progress)
     snprintf(dir, sizeof dir, "%s/ROMS", root);
     plat_mkdir(dir);
 
+    /* TEMPORARY boot-timing probe: the two scans are one number in app.c's
+     * boot line, and which of them the time is in decides what to do about it.
+     * Remove with s_probe_png_* below. */
+    int64_t t_frames0 = plat_now_us();
     scan_folder(root, "FRAMES", load_png, load_json, NULL, NULL);
     int after_frames = s_count;
+    int64_t t_frames1 = plat_now_us();
     scan_folder(root, "ROMS", NULL, NULL, load_gb, load_zip);
+    int64_t t_roms1 = plat_now_us();
     int from_roms = s_count - after_frames;
 
-    PLOGI(TAG, "%d frame(s) from /FRAMES, %d from /ROMS", after_frames, from_roms);
+    PLOGI(TAG, "TEMP %d frame(s) from /FRAMES in %lldms (%d png: %lldms total, of "
+               "which read %lldms + decode %lldms), %d from /ROMS in %lldms",
+          after_frames, (long long)((t_frames1 - t_frames0) / 1000), s_probe_png_n,
+          (long long)(s_probe_png_us / 1000), (long long)(s_probe_read_us / 1000),
+          (long long)(s_probe_decode_us / 1000), from_roms,
+          (long long)((t_roms1 - t_frames1) / 1000));
     if (from_roms > 0) {
         char line[24];
         snprintf(line, sizeof line, "%d NEW FRAME%s", from_roms, from_roms == 1 ? "" : "S");

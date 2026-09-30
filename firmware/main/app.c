@@ -2307,6 +2307,12 @@ static void resume_apply(void)
          * value: settings_changed() is only called once gbemu_run() has
          * returned.) */
         if (gbemu_run_rom(r.emu_rom, r.emu_slot)) {
+            /* Ending that session lands on the ROM list, exactly like ending any
+             * other one - the resumed session was an ordinary session from the
+             * moment it started, and its exit should not be the one place that
+             * drops out to the camera instead. Returns from here only once the
+             * list itself is left. */
+            gbemu_run();
             camera_resume();
             s_set.cam_mode = CAM_MODE_GB;
             s_adjust = load_adjust(s_set.cam_mode);

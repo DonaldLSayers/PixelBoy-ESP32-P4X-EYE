@@ -30,7 +30,9 @@
  * The encoder's momentary taps cover one axis at a time - Left/Right by
  * default, or Up/Down after holding CamMode to toggle (same idiom as Mode-
  * button-click switching what the encoder adjusts in the normal camera
- * app). Holding Menu exits back to the camera app. */
+ * app). Holding Menu ends that session and lands back on the ROM list, so a
+ * second game is one pick away; leaving the *list* - Menu on it, or CamMode on
+ * the save list - is what returns to the camera app. */
 void gbemu_run(void);
 
 /* Run one specific ROM + save slot, skipping both pickers - the deep-sleep
@@ -42,5 +44,10 @@ void gbemu_run(void);
  * .sav, exactly as picking it from the slot list would. Whether a state
  * belongs to this ROM is decided inside gb_state_read() by the ROM's own CRC,
  * so a stale state from another game (or another build) can't be loaded - it
- * is discarded instead. */
+ * is discarded instead.
+ *
+ * Ending a resumed session behaves like ending any other: the caller follows
+ * this with gbemu_run(), so its exit lands on the ROM list rather than out in
+ * the viewfinder. */
+bool gbemu_run_rom(const char *rom_path, int slot);
 bool gbemu_run_rom(const char *rom_path, int slot);

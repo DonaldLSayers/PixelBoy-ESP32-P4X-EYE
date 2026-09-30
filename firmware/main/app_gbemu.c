@@ -8,6 +8,7 @@
  * a legally-dumped GB Camera ROM takes "photos" of whatever the P4's camera
  * sees, run through actual Game Boy hardware emulation. */
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_vfs_fat.h"
 #include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "freertos/FreeRTOS.h"
@@ -748,26 +750,46 @@ static bool gb_state_write(const char *path, const struct gb_s *gb, const gbemu_
         hdr.cam_gain_seeded = s_cam_gain_seeded;
     }
 
+    /* Free space up front, because a full card is the one failure that reports
+     * itself as nothing at all: space running out mid-write gives a short
+     * fwrite() with no error and no bad errno. Read before the write, so the
+     * number printed below is the room this write actually had. */
+    const size_t need = sizeof(gb_state_hdr_t) + sizeof(struct gb_s) + CART_RAM_MAX;
+    uint64_t card_total = 0, card_free = 0;
+    esp_vfs_fat_info("/sdcard", &card_total, &card_free);
+
     FILE *f = fopen(path, "wb");
     if (!f) {
-        ESP_LOGE(TAG, "couldn't open %s to save state", path);
+        ESP_LOGE(TAG, "couldn't open %s to save state (errno %d)", path, errno);
         return false;
     }
-    bool ok = fwrite(&hdr, sizeof hdr, 1, f) == 1;
-    if (ok) ok = fwrite(gb, sizeof *gb, 1, f) == 1;
-    if (ok) ok = fwrite(ctx->cart_ram, 1, CART_RAM_MAX, f) == 1;
+    /* Named stages, because "couldn't write it" has covered a short cart-RAM
+     * write (no space), a failed flush and a failed fsync alike. */
+    const char *stage = "header";
+    size_t put = fwrite(&hdr, sizeof hdr, 1, f);
+    bool ok = put == 1;
+    if (ok) { stage = "gb struct"; ok = fwrite(gb, sizeof *gb, 1, f) == 1; }
+    if (ok) {
+        stage = "cart RAM";
+        put = fwrite(ctx->cart_ram, 1, CART_RAM_MAX, f);
+        ok = put == CART_RAM_MAX;
+    }
+    int err = ok ? 0 : errno;
     /* Pushed all the way out to the card, not just out of stdio: the next thing
      * that happens to this card is the SD rail being cut for deep sleep
      * (plat_enter_deep_sleep()), so bytes still sitting in a buffer at that
      * point are simply gone - which would look exactly like "the state file was
      * never created". fflush() empties stdio's, fsync() the filesystem's. */
-    if (ok) ok = fflush(f) == 0;
-    if (ok) ok = fsync(fileno(f)) == 0;
+    if (ok) { stage = "fflush"; ok = fflush(f) == 0; err = errno; }
+    if (ok) { stage = "fsync"; ok = fsync(fileno(f)) == 0; err = errno; }
     fclose(f);
     if (!ok) {
         /* A half-written state is worse than none: it would be read back and
          * refused (or, for a truncated struct, restore garbage). Delete it. */
-        ESP_LOGE(TAG, "couldn't write %s in full - state dropped", path);
+        ESP_LOGE(TAG, "couldn't write %s in full - failed at %s (errno %d, %s); "
+                      "wanted %u bytes, card had %llu free of %llu - state dropped",
+                 path, stage, err, strerror(err), (unsigned)need,
+                 (unsigned long long)card_free, (unsigned long long)card_total);
         remove(path);
         return false;
     }
@@ -776,7 +798,6 @@ static bool gb_state_write(const char *path, const struct gb_s *gb, const gbemu_
      * sleep and a lost session, and its absence is invisible until the wake -
      * at which point the card has been powered down and there is nothing left
      * to inspect. A state that isn't there has to be known about here. */
-    const size_t need = sizeof(gb_state_hdr_t) + sizeof(struct gb_s) + CART_RAM_MAX;
     struct stat st;
     if (stat(path, &st) != 0 || (size_t)st.st_size != need) {
         ESP_LOGE(TAG, "%s is %ld bytes, expected %u - state dropped", path,
@@ -851,7 +872,11 @@ static gb_state_result_t gb_state_read(const char *path, struct gb_s *gb, gbemu_
     gb_callbacks_save(gb, &cb);
 
     bool ok = fread(gb, sizeof *gb, 1, f) == 1;
-    if (ok) ok = fread(ctx->cart_ram, 1, CART_RAM_MAX, f) == 1;
+    /* CART_RAM_MAX, not 1: fread() returns items, and this call reads
+     * CART_RAM_MAX of them (buffer sized as the item). Comparing against 1
+     * made every complete read look short, so every state was discarded as
+     * corrupt the moment it was read back. */
+    if (ok) ok = fread(ctx->cart_ram, 1, CART_RAM_MAX, f) == CART_RAM_MAX;
     fclose(f);
     gb_callbacks_apply(gb, &cb);
 
@@ -1361,12 +1386,21 @@ void gbemu_run(void)
         return;
     }
 
-    char chosen[300];
-    if (pick_rom(chosen, sizeof chosen)) {
+    /* A session that ends with Menu-hold lands back here, not out in the
+     * viewfinder: past the first game the next thing wanted is nearly always
+     * another ROM or another save, and leaving for the camera means walking all
+     * the way back in for it. The two ways out of the list are both deliberate
+     * - Menu on the ROM list, CamMode on the save list (see pick_rom() and
+     * pick_save_slot()) - and a session that deep-sleeps never returns here at
+     * all (run_rom() sleeps from inside itself), so nothing else can end this
+     * loop. */
+    for (;;) {
+        char chosen[300];
+        if (!pick_rom(chosen, sizeof chosen)) break;
         char sav_path[300];
         int slot = 1;
-        if (pick_save_slot(chosen, sav_path, sizeof sav_path, &slot))
-            run_rom(chosen, sav_path, slot);
+        if (!pick_save_slot(chosen, sav_path, sizeof sav_path, &slot)) break;
+        run_rom(chosen, sav_path, slot);
     }
 
     free(s_roms);
