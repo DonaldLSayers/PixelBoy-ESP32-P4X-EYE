@@ -118,6 +118,23 @@ esp_err_t usb_msc_init(void)
     return tinyusb_driver_install(usb_video_tinyusb_config());
 }
 
+/* USB teardown for deep sleep. usb_msc_init() installs the TinyUSB driver on
+ * every boot and nothing ever took it back down, so the OTG PHY, its
+ * descriptors and the placeholder drive stayed live for the whole sleep, with
+ * nothing plugged in - pure standby load on a device whose entire point is
+ * running off a battery.
+ *
+ * Only reachable from plat_enter_deep_sleep(), which enter_sleep() only gets
+ * to when the SD card is *not* handed to a host (SCREEN_USB) and webcam mode
+ * is off (usb_webcam_active()) - so there is never a transfer in flight to
+ * cut short. Nothing re-installs it on the way back up because there is no
+ * way back up: wake is a reset (see plat_enter_deep_sleep()). */
+void usb_msc_deinit(void)
+{
+    esp_err_t err = tinyusb_driver_uninstall();
+    if (err != ESP_OK) PLOGW(TAG, "tinyusb uninstall: %s", esp_err_to_name(err));
+}
+
 static void sd_host_deinit(void)
 {
     if (s_sd_host.flags & SDMMC_HOST_FLAG_DEINIT_ARG) s_sd_host.deinit_p(s_sd_host.slot);

@@ -20,6 +20,10 @@
  */
 
 esp_err_t usb_msc_init(void);      /* call once at boot */
+/* Takes the USB device back down, for the deep-sleep path only - see the
+ * implementation. Nothing needs to undo it: a wake is a full reset, so the
+ * next boot installs it again. */
+void usb_msc_deinit(void);
 void usb_msc_tick(void);           /* call every frame - drives connect/disconnect detection */
 bool usb_msc_prompt_pending(void); /* a host just connected - show the yes/no prompt */
 bool usb_msc_active(void);         /* true while the real SD card is exposed to the host */

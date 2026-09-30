@@ -13,6 +13,8 @@
 #include "esp_adc/adc_cali_scheme.h"
 
 #include "app_input.h"
+#include "app_usb.h"
+#include "app_wifi_gallery.h"
 #include "platform.h"
 
 static const char *TAG = "platform_esp";
@@ -151,10 +153,31 @@ void plat_enter_deep_sleep(void)
      * (releases the on-chip LDO channel bsp_sdcard_mount() claimed) plus its
      * own enable pin (BSP_SD_EN). RTC GPIO holds keep these levels through
      * deep sleep, so the power actually stays cut, not just logically off. */
+    /* Everything below only makes sense while a rail is still up, so the order
+     * here is the order things stop working in, not an arbitrary one.
+     *
+     * The panel and its backlight are the visible half of this: bsp_display_
+     * enter_sleep() is the BSP's own "you're about to lose power" call (panel
+     * sleep-in command, backlight off). Cutting BSP_LCD_EN below probably
+     * takes the whole rail with it, but "probably" isn't worth leaving a
+     * backlight driver latched at whatever duty the last frame left it at -
+     * and if the backlight boost turns out not to be on that rail at all,
+     * this is the difference between a dark screen and a lit one all night. */
+    bsp_display_enter_sleep();
+
+    /* The USB PHY, unlike the rails below, has no enable pin to cut - only
+     * the driver keeps it alive, so it has to be told to let go (see
+     * usb_msc_deinit()). */
+    usb_msc_deinit();
+
     bsp_sdcard_unmount();
     bsp_feature_enable(BSP_FEATURE_SD, false);
     bsp_feature_enable(BSP_FEATURE_CAMERA, false);
     bsp_feature_enable(BSP_FEATURE_LCD, false);
+    /* The C6 has no power rail of its own to cut - its reset line has to be
+     * held for the whole sleep instead (see app_wifi_gallery.c), which is also
+     * why this is not just another bsp_feature_enable() call. */
+    wifi_gallery_cp_hold_reset();
 
     esp_deep_sleep_enable_gpio_wakeup(BIT64(PIN_BTN_SHUTTER), ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start(); /* never returns - a wake is a full reset, same as power-on */

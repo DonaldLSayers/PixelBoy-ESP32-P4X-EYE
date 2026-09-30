@@ -2052,6 +2052,11 @@ static void frames_boot_progress(const char *l1, const char *l2)
 
 esp_err_t app_init(void)
 {
+    /* First thing, before anything can want the C6: the reset line may still
+     * be held low from the last deep sleep, and an RTC hold outlives the wake
+     * (see wifi_gallery_cp_release_hold()). */
+    wifi_gallery_cp_release_hold();
+
     settings_load(&s_set);
     s_adjust = load_adjust(s_set.cam_mode);
 
