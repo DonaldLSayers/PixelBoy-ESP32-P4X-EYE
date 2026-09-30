@@ -44,10 +44,17 @@ bool app_sleep_due(int64_t idle_us);
  * screen is behind it. The one piece of the resume record that can't be read
  * off app.c's own state, since the emulator is the caller holding it.
  *
+ * state_saved is the caller's own answer for whether this session's .state
+ * actually reached the card - it is what the sleep screen reports. A sleep with
+ * the record but without the file would come back to this ROM on its title
+ * screen instead of the frame the player left, and nothing else would ever say
+ * why: the card is powered down a moment later, so the file cannot be looked at
+ * afterwards.
+ *
  * Call it immediately before app_enter_sleep(), and only on the sleep path -
  * a deliberate exit deletes that slot's .state, so coming back to it would
  * have nothing to resume anyway. */
-void app_resume_note_gbemu(const char *rom_path, int slot);
+void app_resume_note_gbemu(const char *rom_path, int slot, bool state_saved);
 
 /* Whether this iteration's input should be discarded: true from a deep-sleep
  * GPIO wake until the button that caused it has been seen and released. A wake

@@ -8,6 +8,8 @@
  * a legally-dumped GB Camera ROM takes "photos" of whatever the P4's camera
  * sees, run through actual Game Boy hardware emulation. */
 #include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -754,6 +756,13 @@ static bool gb_state_write(const char *path, const struct gb_s *gb, const gbemu_
     bool ok = fwrite(&hdr, sizeof hdr, 1, f) == 1;
     if (ok) ok = fwrite(gb, sizeof *gb, 1, f) == 1;
     if (ok) ok = fwrite(ctx->cart_ram, 1, CART_RAM_MAX, f) == 1;
+    /* Pushed all the way out to the card, not just out of stdio: the next thing
+     * that happens to this card is the SD rail being cut for deep sleep
+     * (plat_enter_deep_sleep()), so bytes still sitting in a buffer at that
+     * point are simply gone - which would look exactly like "the state file was
+     * never created". fflush() empties stdio's, fsync() the filesystem's. */
+    if (ok) ok = fflush(f) == 0;
+    if (ok) ok = fsync(fileno(f)) == 0;
     fclose(f);
     if (!ok) {
         /* A half-written state is worse than none: it would be read back and
@@ -762,7 +771,20 @@ static bool gb_state_write(const char *path, const struct gb_s *gb, const gbemu_
         remove(path);
         return false;
     }
-    ESP_LOGW(TAG, "wrote state %s", path);
+
+    /* Verified, not assumed: this file is the only thing standing between a
+     * sleep and a lost session, and its absence is invisible until the wake -
+     * at which point the card has been powered down and there is nothing left
+     * to inspect. A state that isn't there has to be known about here. */
+    const size_t need = sizeof(gb_state_hdr_t) + sizeof(struct gb_s) + CART_RAM_MAX;
+    struct stat st;
+    if (stat(path, &st) != 0 || (size_t)st.st_size != need) {
+        ESP_LOGE(TAG, "%s is %ld bytes, expected %u - state dropped", path,
+                 (long)(stat(path, &st) == 0 ? st.st_size : -1), (unsigned)need);
+        remove(path);
+        return false;
+    }
+    ESP_LOGW(TAG, "wrote state %s (%u bytes)", path, (unsigned)need);
     return true;
 }
 
@@ -792,8 +814,13 @@ static gb_state_result_t gb_state_read(const char *path, struct gb_s *gb, gbemu_
     const size_t need = sizeof(gb_state_hdr_t) + sizeof(struct gb_s) + CART_RAM_MAX;
 
     gb_state_hdr_t hdr;
-    if ((size_t)fsize != need ||
-        fread(&hdr, sizeof hdr, 1, f) != 1 ||
+    if ((size_t)fsize != need) {
+        fclose(f);
+        ESP_LOGW(TAG, "%s is %ld bytes, expected %u - discarded", path, fsize, (unsigned)need);
+        remove(path);
+        return GB_STATE_NONE;
+    }
+    if (fread(&hdr, sizeof hdr, 1, f) != 1 ||
         hdr.magic != GB_STATE_MAGIC ||
         hdr.version != GB_STATE_VERSION ||
         hdr.gb_size != sizeof(struct gb_s) ||
@@ -801,8 +828,19 @@ static gb_state_result_t gb_state_read(const char *path, struct gb_s *gb, gbemu_
         hdr.rom_crc != ctx->rom_crc ||
         hdr.rom_size != (uint32_t)ctx->rom_size ||
         hdr.cam != (gb->mbc == 6)) {
+        /* Which field, and both values - a bare "doesn't match" is unactionable,
+         * and this is the one branch where the wrong answer costs the player
+         * their session (the file is removed below and cannot be recovered
+         * from a card that has already been powered down and back up). */
         fclose(f);
-        ESP_LOGW(TAG, "%s doesn't match this ROM/build - discarded", path);
+        ESP_LOGW(TAG,
+                 "%s doesn't match this ROM/build - discarded (magic %08x/%08x version %u/%u gb_size %u/%u "
+                 "cart_size %u/%u rom_crc %08x/%08x rom_size %u/%u cam %u/%u)",
+                 path, (unsigned)hdr.magic, (unsigned)GB_STATE_MAGIC, (unsigned)hdr.version,
+                 (unsigned)GB_STATE_VERSION, (unsigned)hdr.gb_size, (unsigned)sizeof(struct gb_s),
+                 (unsigned)hdr.cart_size, (unsigned)CART_RAM_MAX, (unsigned)hdr.rom_crc,
+                 (unsigned)ctx->rom_crc, (unsigned)hdr.rom_size, (unsigned)ctx->rom_size,
+                 (unsigned)hdr.cam, (unsigned)(gb->mbc == 6));
         remove(path);
         return GB_STATE_NONE;
     }
@@ -1246,8 +1284,9 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
      * mid-level from a session they ended on purpose. It also has to be the
      * way back to a clean start at all, since there's no on-device way to
      * delete a file by hand. */
+    bool state_saved = false;
     if (sleeping) {
-        gb_state_write(state_path, &gb, &ctx);
+        state_saved = gb_state_write(state_path, &gb, &ctx);
     } else if (file_exists(state_path)) {
         remove(state_path);
     }
@@ -1260,7 +1299,7 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
          * but cannot know any of this by itself (see app.c's s_resume). Only on
          * this path: a deliberate exit deletes the .state above and has nothing
          * to resume. */
-        app_resume_note_gbemu(rom_path, slot);
+        app_resume_note_gbemu(rom_path, slot, state_saved);
         /* Never returns - the next power-on is a reset, which is why the save
          * had to be written above. The game's last frame is still underneath
          * the SLEEPING message app_enter_sleep() draws. */

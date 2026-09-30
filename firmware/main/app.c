@@ -180,6 +180,10 @@ static RTC_DATA_ATTR resume_rec_t s_resume;
 static bool s_resume_gbemu;
 static char s_resume_rom[300];
 static int s_resume_slot;
+/* Whether that session's .state actually made it to the card - reported on the
+ * sleep screen, since a sleep without it comes back to the ROM's title screen
+ * with nothing else to say why (see app_resume_note_gbemu()). */
+static bool s_resume_state_saved;
 
 /* ------------------------------------------------------------------- menu */
 
@@ -1010,6 +1014,15 @@ void app_enter_sleep(void)
     ESP_LOGI(TAG, "deep sleep"); /* last line before the reset - a wake is a fresh boot */
     display_begin_blank(0, 0, 0);
     display_text(DISP_W / 2 - display_text_width("SLEEPING", 3) / 2, 100, 3, "SLEEPING", 255, 255, 255);
+    /* Only for an emulator session, where there is a question to answer: the
+     * game comes back on the frame it was left on, or it comes back on its
+     * title screen. The card is powered down right after this, so this screen
+     * is the only chance to see which. */
+    if (s_resume.kind == RESUME_GBEMU) {
+        const char *msg = s_resume_state_saved ? "GAME SAVED" : "GAME NOT SAVED";
+        uint8_t r = s_resume_state_saved ? 160 : 255, g = s_resume_state_saved ? 160 : 80;
+        display_text(DISP_W / 2 - display_text_width(msg, 1) / 2, 140, 1, msg, r, g, s_resume_state_saved ? 160 : 80);
+    }
     display_end_frame();
     plat_sleep_ms(400); /* let it actually show before the screen cuts out */
     plat_enter_deep_sleep(); /* cuts camera/LCD/SD power; wakes (as a fresh boot) on Shutter - never returns */
@@ -2220,9 +2233,10 @@ bool app_boot_swallow_poll(void)
 
 /* -------------------------------------------------------------- waking up */
 
-void app_resume_note_gbemu(const char *rom_path, int slot)
+void app_resume_note_gbemu(const char *rom_path, int slot, bool state_saved)
 {
     s_resume_gbemu = true;
+    s_resume_state_saved = state_saved;
     snprintf(s_resume_rom, sizeof s_resume_rom, "%s", rom_path ? rom_path : "");
     s_resume_slot = slot;
 }
