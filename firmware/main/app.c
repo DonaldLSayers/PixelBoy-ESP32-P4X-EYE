@@ -33,6 +33,7 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
+#include "esp_sleep.h"
 #endif
 #include <string.h>
 
@@ -924,6 +925,15 @@ static void take_photo(void)
 
 void app_enter_sleep(void)
 {
+    /* Standby almost always got here first (the SLEEP timeouts are minutes
+     * against standby's tens of seconds), which means the backlight is
+     * already at 0 and the message below would be drawn onto a panel nobody
+     * can see - making a device that slept successfully indistinguishable
+     * from one that is merely standing by. Bring it up for the 400ms the
+     * message is held; app_backlight_percent(0) is the user's own setting,
+     * not a fixed level. */
+    display_set_backlight(app_backlight_percent());
+    ESP_LOGI(TAG, "deep sleep"); /* last line before the reset - a wake is a fresh boot */
     display_begin_blank(0, 0, 0);
     display_text(DISP_W / 2 - display_text_width("SLEEPING", 3) / 2, 100, 3, "SLEEPING", 255, 255, 255);
     display_end_frame();
@@ -1029,16 +1039,14 @@ static void truncate_value(char *out, const char *in)
 
 /* --------------------------------------------------------------- backlight */
 
-/* The LCD backlight is one of the only loads on this board that stays on
- * continuously no matter what the CPU is doing, so it's the one worth
- * dropping first. s_last_input_us (see app_step()) already tracks "how long
- * since the user touched anything" for the auto-sleep check - this reuses it
- * with a much shorter window, so the screen visibly dims well before the
- * device deep-sleeps, and comes straight back up on the next event. Purely
- * cosmetic: nothing here touches the pixels, so a dimmed viewfinder still
- * captures, and USB mirror mode still streams, at full brightness. */
-#define IDLE_DIM_US (20 * 1000 * 1000LL)
-#define IDLE_DIM_PERCENT 15
+/* There used to be an auto-dim tier here - 20s of idle pulled the backlight
+ * to 15% before standby took it out entirely. Removed: a dimmed screen is
+ * still a screen the user is looking at, so it bought almost no power while
+ * making every press during that window ambiguous - was it meant for the game
+ * or just to bring the light back? Losing it means the screen is either at the
+ * user's own level or off, and "off" is the only state that has to intercept a
+ * press (see the swallow in app_step()/run_rom()). Standby arrives sooner for
+ * it - see STANDBY_SECONDS below. */
 
 /* Auto-standby timeout choices - see STANDBY_OPTIONS_COUNT in app_settings.h
  * and ROW_STANDBY below - 0 = never. Not deep sleep: standby is the cheap,
@@ -1057,37 +1065,33 @@ static const char *const STANDBY_LABELS[STANDBY_OPTIONS_COUNT] = {"NEVER", "15 S
  * needs to know whether the screen is meant to be out at all. */
 static bool s_standby;
 
-/* "Never" as far as the two functions below are concerned, and a guard for the
- * dim threshold further down: a sentinel rather than 0 because 0 is itself a
- * meaningful entry in STANDBY_SECONDS[] (never), not "unset". */
+/* Set when a press is spent waking the screen rather than doing what it says
+ * (see the drain in app_step()), and kept set until that same touch is over.
+ * A press is not one event: releasing it posts a click, and holding it posts a
+ * long-press, both hundreds of ms after the backlight is already back on - so
+ * without this the press would wake the device and its own tail would then
+ * open the menu, take a photo or exit a ROM. Same flag, same reason, in
+ * app_gbemu.c's run_rom(). */
+static bool s_swallow_press;
+
+/* "Never" as far as the two functions below are concerned: a sentinel rather
+ * than 0 because 0 is itself a meaningful entry in STANDBY_SECONDS[] (never),
+ * not "unset". */
 static int64_t standby_us(void)
 {
     int sec = STANDBY_SECONDS[s_set.standby];
     return sec == 0 ? 0 : (int64_t)sec * 1000000LL;
 }
 
-/* The dim half of that policy, shared with app_gbemu.c (see app.h). Never
- * returns 0; full-off belongs to whichever loop is doing the standby
- * (app_step() also stops the camera, the emulator doesn't).
+/* The user's own level, shared with app_gbemu.c (see app.h). Never returns 0;
+ * full-off belongs to whichever loop is doing the standby (app_step() also
+ * stops the camera, the emulator doesn't).
  *
- * Takes idle_us rather than reading this file's own s_last_input_us, because
- * the emulator tracks its idle time separately - there is no one shared
- * clock behind both loops. */
-int app_backlight_percent(int64_t idle_us)
-{
-    int64_t dim_us = IDLE_DIM_US;
-    /* With standby tuned shorter than the fixed dim delay, dimming first would
-     * mean flickering through a level nobody ever sees - 15 SEC standby would
-     * dim at 20s, five seconds after the screen was already out. Pull the dim
-     * in to stay clear of it instead (5s of dim, then the screen out), and
-     * leave the 20s delay alone whenever standby is comfortably later or off. */
-    int64_t sb = standby_us();
-    if (sb != 0 && sb - dim_us < 5000000LL) dim_us = sb - 5000000LL;
-
-    int want = BACKLIGHT_PERCENT[s_set.backlight];
-    if (idle_us > dim_us && want > IDLE_DIM_PERCENT) want = IDLE_DIM_PERCENT;
-    return want;
-}
+ * Takes no idle argument any more - the auto-dim that used it is gone (see the backlight
+ * section above), so this is the setting and nothing else. Both loops still come through
+ * here rather than reading BACKLIGHT_PERCENT[] directly because that table is private to
+ * this file. */
+int app_backlight_percent(void) { return BACKLIGHT_PERCENT[s_set.backlight]; }
 
 /* The timeout half of that policy, shared with app_gbemu.c (see app.h). The
  * standby state itself is each loop's own business - what app_step() does
@@ -1115,16 +1119,16 @@ bool app_sleep_due(int64_t idle_us)
 }
 
 /* Idempotent and cheap to call every app_step(): display_hw_set_backlight()
- * ignores a value it's already at, so an un-dimmed viewfinder doesn't retouch
- * the LEDC duty (or its INFO log) 15 times a second. */
+ * ignores a value it's already at, so a lit viewfinder doesn't retouch the
+ * LEDC duty (or its INFO log) 15 times a second. */
 static void update_backlight(void)
 {
-    display_set_backlight(s_standby ? 0 : app_backlight_percent(now_us() - s_last_input_us));
+    display_set_backlight(s_standby ? 0 : app_backlight_percent());
 }
 
 /* ---------------------------------------------------------------- standby */
 
-/* A second, deeper idle step past the dim above: the backlight goes out
+/* The one idle step: the backlight goes out
  * completely and, in the viewfinder, the camera stops streaming. Those are
  * the two biggest continuous loads on the board - the sensor/MIPI/ISP chain
  * especially, which runs at its own 25fps regardless of how few frames this
@@ -1141,8 +1145,8 @@ static void update_backlight(void)
  * constantly, not to be a one-way trip.
  *
  * The timeout itself is the user's (ROW_STANDBY, see app_standby_due()) and
- * defaults to 30s, which sits between IDLE_DIM_US (20s) and the shortest
- * ROW_SLEEP timeout (1 min). */
+ * defaults to 30s - comfortably inside the shortest ROW_SLEEP timeout (1 min),
+ * so the two are ordered by default rather than racing. */
 #define STANDBY_POLL_MS 20
 
 /* Whether *this* stopped the camera, as opposed to finding it already stopped
@@ -2070,6 +2074,17 @@ esp_err_t app_init(void)
      * (see wifi_gallery_cp_release_hold()). */
     wifi_gallery_cp_release_hold();
 
+    /* Say why this boot happened. A wake out of ROW_SLEEP's deep sleep is
+     * indistinguishable from a power-on from in here - the panel, the SD card
+     * and the C6 are all in the same state either way - and it's the only way
+     * to tell a sleep that worked from one that never fired. WARN rather than
+     * INFO because a deep-sleep wake should be the common case on a battery. */
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO)
+        ESP_LOGW(TAG, "boot: woke from deep sleep, gpio mask 0x%08llx",
+                 (unsigned long long)esp_sleep_get_gpio_wakeup_status());
+    else
+        ESP_LOGI(TAG, "boot: power-on or reset, not a sleep wake");
+
     settings_load(&s_set);
     s_adjust = load_adjust(s_set.cam_mode);
 
@@ -2262,6 +2277,8 @@ void app_step(void)
      * later would dispatch that press with the camera still stopped and the
      * screen still dark, and standby's own camera_resume() would then undo the
      * pause enter_menu() just made. */
+    /* Read before the pending input below refreshes the idle clock - this is
+     * "was the screen lit when the user touched it". */
     bool was_standby = s_standby;
     if (input_pending()) s_last_input_us = now_us();
     update_standby();
@@ -2274,15 +2291,31 @@ void app_step(void)
          * doing nothing, so whatever was pressed into it was asking to see the
          * screen again, not asking for what that button does - and the live
          * Shutter lands as a photo of a viewfinder the user couldn't see to
-         * frame. Same discard as the emulator loop's (see in_standby in
-         * app_gbemu.c's run_rom()). The next press acts normally. */
-        if (was_standby) continue;
+         * frame.
+         *
+         * The whole touch is swallowed, not just the press in it: s_swallow_press
+         * stays set until the button comes back up (see below), because the
+         * click or long-press that ends this press arrives after the backlight
+         * is already on and would otherwise be dispatched as if the user had
+         * meant it. Same rule and same flag as the emulator loop's (see
+         * run_rom()); the next touch acts normally. */
+        if (was_standby || s_swallow_press) {
+            s_swallow_press = true;
+            continue;
+        }
         if (s_screen == SCREEN_USB) handle_usb_input(&ev);
         else if (s_screen == SCREEN_VIEWFINDER) handle_viewfinder_input(&ev);
         else if (s_screen == SCREEN_MENU) handle_menu_input(&ev);
         else if (s_screen == SCREEN_WIFI) handle_wifi_input(&ev);
         else handle_gallery_input(&ev);
     }
+
+    /* The waking touch is over once nothing is held and nothing is still
+     * queued. Both conditions matter: the click that ends a press is put in
+     * the queue by the same poll callback that clears the button state, so
+     * checking the button alone would drop the flag in the window between the
+     * two and let exactly the event this exists to swallow through. */
+    if (s_swallow_press && !input_any_held() && !input_pending()) s_swallow_press = false;
 
     /* Why this fires and when it deliberately doesn't: see app_sleep_due().
      * Nothing to tear down here - app_step() owns no state that doesn't

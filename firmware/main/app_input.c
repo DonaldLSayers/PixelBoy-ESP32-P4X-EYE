@@ -141,3 +141,14 @@ bool input_get(input_event_t *ev, uint32_t timeout_ms)
 }
 
 bool input_pending(void) { return uxQueueMessagesWaiting(s_queue) > 0; }
+
+/* Read from the main task, written by poll_cb() in the esp_timer task. Each
+ * flag is a single byte, so a torn read isn't possible and an answer that is
+ * one poll (20ms) stale is exactly as good as a fresh one here - see its
+ * comment in app_input.h. */
+bool input_any_held(void)
+{
+    for (int i = 0; i < BTN_COUNT; i++)
+        if (s_btn[i].pressed) return true;
+    return false;
+}

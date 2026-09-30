@@ -179,6 +179,14 @@ void plat_enter_deep_sleep(void)
      * why this is not just another bsp_feature_enable() call. */
     wifi_gallery_cp_hold_reset();
 
-    esp_deep_sleep_enable_gpio_wakeup(BIT64(PIN_BTN_SHUTTER), ESP_GPIO_WAKEUP_GPIO_LOW);
+    /* Checked, not assumed: if this ever failed there would be no wake source
+     * at all, and a device that deep-slept with no way back reads as dead
+     * (only a power cycle recovers it) - the one failure here worth a log line
+     * rather than a silent night. GPIO2 is inside the ESP32-P4's deep-sleep
+     * wake mask (GPIO0-15), and CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS
+     * makes IDF drive the pull-up itself on the way in, so the pin can't float
+     * low and wake it straight back up. */
+    esp_err_t wake_err = esp_deep_sleep_enable_gpio_wakeup(BIT64(PIN_BTN_SHUTTER), ESP_GPIO_WAKEUP_GPIO_LOW);
+    if (wake_err != ESP_OK) PLOGE(TAG, "no deep sleep wake source: %s", esp_err_to_name(wake_err));
     esp_deep_sleep_start(); /* never returns - a wake is a full reset, same as power-on */
 }

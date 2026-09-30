@@ -19,11 +19,12 @@ void app_step(void);
  * idle_us is the caller's own "time since last input", not a shared clock:
  * there is no one clock behind both loops.
  *
- * app_backlight_percent() is the duty (%) for that much idle, dimmed to match
- * the viewfinder's own idle-dim. Never returns 0 - switching the screen fully
- * off is a standby decision each caller makes for itself, because standby means
- * different things in each loop (app_step() also stops the camera, the emulator
- * must not - see run_rom()'s standby block).
+ * app_backlight_percent() is the duty (%) the user has set. It takes no idle
+ * argument: there is no auto-dim any more (see app.c's backlight section), so
+ * the level is the setting and nothing else. Never returns 0 - switching the
+ * screen fully off is a standby decision each caller makes for itself, because
+ * standby means different things in each loop (app_step() also stops the
+ * camera, the emulator must not - see run_rom()'s standby block).
  *
  * app_standby_due() says whether that much idle has crossed the user's own
  * standby timeout (ROW_STANDBY; false when it's set to NEVER).
@@ -34,7 +35,7 @@ void app_step(void);
  * for the emulator it is not just a matter of stopping a loop but of tearing
  * the ROM down first (see run_rom()), so the caller passes the verdict on to
  * app_enter_sleep() only after it has finished with its own state. */
-int app_backlight_percent(int64_t idle_us);
+int app_backlight_percent(void);
 bool app_standby_due(int64_t idle_us);
 bool app_sleep_due(int64_t idle_us);
 

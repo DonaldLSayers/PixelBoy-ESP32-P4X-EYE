@@ -985,11 +985,11 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
     int64_t left_until_us = 0, right_until_us = 0, up_until_us = 0, down_until_us = 0;
     int64_t a_until_us = 0, b_until_us = 0, select_until_us = 0;
     /* Idle handling, same shape as app_step()'s (see app_backlight_percent()
-     * in app.c, which supplies the dim level). This loop never returns to
-     * app_step() while a ROM is loaded, so none of that runs here: without
-     * this, setting the device down mid-game would leave the backlight on and
-     * a full Game Boy frame being emulated and pushed at ~60Hz for as long as
-     * the ROM stayed loaded. */
+     * in app.c, which supplies the user's own backlight level). This loop
+     * never returns to app_step() while a ROM is loaded, so none of that runs
+     * here: without this, setting the device down mid-game would leave the
+     * backlight on and a full Game Boy frame being emulated and pushed at
+     * ~60Hz for as long as the ROM stayed loaded. */
     int64_t last_input_us = plat_now_us();
     /* gb_run_frame() has no real-time pacing of its own - it just advances
      * emulated game time by exactly one Game Boy frame per call, as fast as
@@ -1005,6 +1005,14 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
      * just below, which is why it lives out here rather than in either one -
      * see the discard there. */
     bool in_standby = false;
+    /* The same rule as app.c's s_swallow_press, and the same reason this one
+     * is here rather than in the standby block: a press is not one event. The
+     * press itself is swallowed while in_standby is set, but its click (or the
+     * long-press at 600ms) arrives after this loop has already cleared
+     * in_standby and brought the backlight up - so waking the device with
+     * Shutter took the photo, and waking it with Menu exited the ROM. Stays set
+     * until the button comes back up. */
+    bool swallow_press = false;
     bool running = true;
     bool sleeping = false; /* exits the loop into app_enter_sleep() instead of back to the launcher */
 
@@ -1038,9 +1046,18 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
              * handed to the game: standby is entered by doing nothing, so
              * nothing pressed into it was aimed at the game, and Shutter is
              * the one that bites - it wakes the screen and takes the photo on
-             * the same frame, in a game you can't see yet. The next press
-             * behaves normally. */
-            if (in_standby) continue;
+             * the same frame, in a game you can't see yet.
+             *
+             * Swallowing the whole touch, not just the press in it, is what
+             * makes that true in practice: the tail of this same press (its
+             * click, or the long-press at 600ms) arrives after in_standby is
+             * already clear, and Menu's long-press exits the ROM - so waking
+             * the game with Menu used to quit it. The next touch acts
+             * normally. */
+            if (in_standby || swallow_press) {
+                swallow_press = true;
+                continue;
+            }
             if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_MENU) {
                 running = false;
             } else if (ev.type == INPUT_LONG_PRESS && ev.button == BTN_CAMMODE) {
@@ -1135,7 +1152,13 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
 
         bool standby = app_standby_due(idle_us);
         in_standby = standby;
-        display_set_backlight(standby ? 0 : app_backlight_percent(idle_us));
+        display_set_backlight(standby ? 0 : app_backlight_percent());
+        /* The waking touch is over once nothing is held and nothing is still
+         * queued - both, because the click that ends a press is queued by the
+         * same callback that clears the button state, and checking the button
+         * alone would drop the flag in the window between the two. Same rule as
+         * app.c's s_swallow_press. */
+        if (swallow_press && !input_any_held() && !input_pending()) swallow_press = false;
         if (standby) {
             /* Nothing to emulate and nothing to show, so skip the frame
              * entirely - both gb_run_frame() and the display push below are
@@ -1225,14 +1248,9 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
     rom_teardown(&gb, &ctx, sav_path, true);
 
     if (sleeping) {
-        /* Long enough idle (minutes) that the device went to standby first in
-         * the usual case, so the screen is dark and the SLEEPING message below
-         * would be invisible unless the backlight comes back for it - it's the
-         * only cue the user gets that this wasn't a crash, so bring it up for
-         * the 400ms app_enter_sleep() holds the message. The game's last frame
-         * is still underneath. Never returns - the next power-on is a reset,
-         * which is why the save had to be written above. */
-        display_set_backlight(app_backlight_percent(0));
+        /* Never returns - the next power-on is a reset, which is why the save
+         * had to be written above. The game's last frame is still underneath
+         * the SLEEPING message app_enter_sleep() draws. */
         app_enter_sleep();
         return; /* not reached - see app.h */
     }
