@@ -142,3 +142,8 @@ void display_end_frame(void);
  * valid until the next display_begin_*() call. Used for USB "mirror mode"
  * (see usb_webcam_feed() in app_usb.h) - not needed for normal rendering. */
 const uint16_t *display_last_frame(void);
+
+/* Panel backlight duty, 0..100 (%) - the app's idle-dim and its BACKLIGHT
+ * setting both go through here (see update_backlight()/ROW_BACKLIGHT in
+ * app.c). Pixel content is untouched: this is only the LED behind the panel. */
+void display_set_backlight(int percent);

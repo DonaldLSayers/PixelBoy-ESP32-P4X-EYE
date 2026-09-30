@@ -699,3 +699,5 @@ void display_end_frame(void)
 }
 
 const uint16_t *display_last_frame(void) { return s_fb; }
+
+void display_set_backlight(int percent) { display_hw_set_backlight(percent); }

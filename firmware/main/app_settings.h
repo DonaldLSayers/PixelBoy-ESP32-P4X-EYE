@@ -42,9 +42,16 @@ typedef struct {
                      * count - more shots means finer sampling of that same range, not a wider
                      * one (confirmed on real hardware that a wider range clips outer shots to
                      * near-total white/black) - see gb_aeb_capture() in app.c. */
+    uint8_t backlight; /* index into app.c's BACKLIGHT_PERCENT[], BACKLIGHT_OPTIONS_COUNT entries -
+                        * the LCD backlight's own duty, nothing to do with `brightness` above
+                        * (that one is the GB Camera's emulated exposure, a pixel-level effect).
+                        * Last field on purpose: app_settings.c's load is size-tolerant and only
+                        * defaults the tail it didn't get, so appending here keeps an older saved
+                        * blob loading rather than failing settings_valid(). */
 } app_settings_t;
 
 #define SLEEP_OPTIONS_COUNT 6
+#define BACKLIGHT_OPTIONS_COUNT 4
 
 /* app_settings_common.c - no board-specific logic, just defaults/validation. */
 void settings_defaults(app_settings_t *s);

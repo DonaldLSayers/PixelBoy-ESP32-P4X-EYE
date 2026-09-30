@@ -111,3 +111,16 @@ void display_hw_present(uint16_t *fb)
 {
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, DISP_W, DISP_H, fb);
 }
+
+void display_hw_set_backlight(int percent)
+{
+    /* bsp_display_brightness_set() has its own LEDC 0..100 clamp and the
+     * "Setting LCD backlight: N%" INFO log on every call - at the idle-dim
+     * cadence this is called on every input event, so only actually touch the
+     * duty when the value changes, both to keep the log quiet and to skip a
+     * pointless LEDC write on every encoder detent. */
+    static int s_last = -1;
+    if (percent == s_last) return;
+    s_last = percent;
+    bsp_display_brightness_set(percent);
+}

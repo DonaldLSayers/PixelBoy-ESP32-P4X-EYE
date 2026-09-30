@@ -140,6 +140,7 @@ typedef enum {
     ROW_DC_AUTO,
     ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
+    ROW_BACKLIGHT,
     ROW_SLEEP,
     ROW_GALLERY, ROW_WIFI, ROW_EXIT
 } menu_row_t;
@@ -148,7 +149,14 @@ typedef enum {
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[11]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 4 shared rows */
+/* LCD backlight duty (%) choices - see BACKLIGHT_OPTIONS_COUNT in
+ * app_settings.h and ROW_BACKLIGHT below. Deliberately tops out at 100%, the
+ * fixed level this always ran at before the setting existed, and 25% is the
+ * lowest step that still reads easily outdoors-ish rather than a token "dim"
+ * that's useless in daylight. */
+static const int BACKLIGHT_PERCENT[BACKLIGHT_OPTIONS_COUNT] = {25, 50, 75, 100};
+
+static menu_row_t s_menu_rows[12]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 5 shared rows */
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -1018,6 +1026,30 @@ static void truncate_value(char *out, const char *in)
     snprintf(out, 12, "%s", in);
 }
 
+/* --------------------------------------------------------------- backlight */
+
+/* The LCD backlight is one of the only loads on this board that stays on
+ * continuously no matter what the CPU is doing, so it's the one worth
+ * dropping first. s_last_input_us (see app_step()) already tracks "how long
+ * since the user touched anything" for the auto-sleep check - this reuses it
+ * with a much shorter window, so the screen visibly dims well before the
+ * device deep-sleeps, and comes straight back up on the next event. Purely
+ * cosmetic: nothing here touches the pixels, so a dimmed viewfinder still
+ * captures, and USB mirror mode still streams, at full brightness. */
+#define IDLE_DIM_US (20 * 1000 * 1000LL)
+#define IDLE_DIM_PERCENT 15
+
+/* Idempotent and cheap to call every app_step(): display_hw_set_backlight()
+ * ignores a value it's already at, so an un-dimmed viewfinder doesn't retouch
+ * the LEDC duty (or its INFO log) 15 times a second. */
+static void update_backlight(void)
+{
+    int want = BACKLIGHT_PERCENT[s_set.backlight];
+    if (now_us() - s_last_input_us > IDLE_DIM_US && want > IDLE_DIM_PERCENT)
+        want = IDLE_DIM_PERCENT;
+    display_set_backlight(want);
+}
+
 static void build_menu(void)
 {
     s_menu_count = 0;
@@ -1039,6 +1071,7 @@ static void build_menu(void)
     } else { /* CAM_MODE_NORMAL */
         s_menu_rows[s_menu_count++] = ROW_NORMAL_SIZE;
     }
+    s_menu_rows[s_menu_count++] = ROW_BACKLIGHT;
     s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
     s_menu_rows[s_menu_count++] = ROW_WIFI;
@@ -1058,11 +1091,11 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
-    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 4 shared rows
-     * (Sleep/Gallery/WiFi/Exit) = 11, the largest any mode builds. */
-    char labels[11][13], values[11][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
-    const char *label_ptrs[11], *value_ptrs[11];
-    icon_id_t icons[11];
+    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 5 shared rows
+     * (Backlight/Sleep/Gallery/WiFi/Exit) = 12, the largest any mode builds. */
+    char labels[12][13], values[12][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
+    const char *label_ptrs[12], *value_ptrs[12];
+    icon_id_t icons[12];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
@@ -1161,6 +1194,17 @@ static void draw_menu(void)
             truncate_value(values[i], normal_size_name(s_set.normal_size));
             val = values[i];
             icons[i] = ICON_SIZE;
+            break;
+        case ROW_BACKLIGHT:
+            /* "BACKLIGHT", not "BRIGHTNESS" - that name is already taken by the
+             * viewfinder's own quick-adjust (the GB Camera's emulated exposure,
+             * a pixel-level effect), and the two are easy to confuse. Reuses
+             * the SLEEP icon rather than adding a new generated asset for one
+             * row - same trade-off ROW_GB_AEB makes with ICON_AUTO. */
+            snprintf(labels[i], sizeof labels[i], "BACKLIGHT");
+            snprintf(values[i], sizeof values[i], "%d%%", BACKLIGHT_PERCENT[s_set.backlight]);
+            val = values[i];
+            icons[i] = ICON_SLEEP;
             break;
         case ROW_SLEEP:
             snprintf(labels[i], sizeof labels[i], "SLEEP");
@@ -1264,6 +1308,15 @@ static void activate_menu_row(void)
     case ROW_NORMAL_SIZE:
         s_set.normal_size = (uint8_t)((s_set.normal_size + 1) % NORMAL_SIZE_COUNT);
         settings_changed(&s_set);
+        break;
+    case ROW_BACKLIGHT:
+        s_set.backlight = (uint8_t)((s_set.backlight + 1) % BACKLIGHT_OPTIONS_COUNT);
+        settings_changed(&s_set);
+        /* Not just saved - applied now, so the new level is visible in the
+         * menu the moment it's picked. update_backlight() won't undo it: the
+         * Shutter press that got here already refreshed s_last_input_us, so
+         * the idle window is nowhere near elapsed. */
+        update_backlight();
         break;
     case ROW_SLEEP:
         s_set.sleep_min = (uint8_t)((s_set.sleep_min + 1) % SLEEP_OPTIONS_COUNT);
@@ -1906,6 +1959,10 @@ esp_err_t app_init(void)
     display_begin_blank(0, 0, 0);
     display_text(DISP_W / 2 - display_text_width("PIXELBOY", 3) / 2, 100, 3, "PIXELBOY", 255, 255, 255);
     display_end_frame();
+    /* display_hw_init() leaves the panel at 100% - bring it straight to the
+     * saved level instead, so the boot splash and everything after it are
+     * already at the level the user picked rather than flashing full-bright. */
+    display_set_backlight(BACKLIGHT_PERCENT[s_set.backlight]);
 
     err = input_init();
     if (err != ESP_OK) {
@@ -2047,6 +2104,10 @@ void app_step(void)
         else if (s_screen == SCREEN_WIFI) handle_wifi_input(&ev);
         else handle_gallery_input(&ev);
     }
+
+    /* After the input drain above, so a fresh event clears the idle window in
+     * the same step it arrived in - see update_backlight(). */
+    update_backlight();
 
     /* Not while the SD card's handed to a PC (s_screen==SCREEN_USB implies
      * usb_msc_active(), given app_step()'s own check above) - cutting power

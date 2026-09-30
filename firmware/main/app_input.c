@@ -9,8 +9,19 @@
 
 static const char *TAG = "input";
 
-#define POLL_MS 5
-#define DEBOUNCE_SAMPLES 3
+/* Battery: this runs in the esp_timer task, so every tick is a wakeup no
+ * matter how idle the rest of the system is - 5ms meant 200 of them a second,
+ * forever, for four GPIO reads and one PCNT read. There's no polling faster
+ * than the hardware can physically bounce, so 50Hz loses nothing real: the
+ * encoder is counted in the PCNT peripheral itself (a missed poll just makes
+ * the next one emit several detents at once, never drops counts), and a human
+ * button tap is 80ms+ against a 20ms sample.
+ *
+ * DEBOUNCE_SAMPLES drops 3 -> 2 with it: at 20ms/sample, 3 samples would need
+ * a 60ms-confirmed press and start eating genuinely quick taps. 2 samples is
+ * a 20-40ms confirmation window, still well under any real tap. */
+#define POLL_MS 20
+#define DEBOUNCE_SAMPLES 2
 #define LONG_PRESS_MS 600
 
 static const int s_pins[BTN_COUNT] = {PIN_BTN_MENU, PIN_BTN_MODE, PIN_BTN_CAMMODE, PIN_BTN_SHUTTER};

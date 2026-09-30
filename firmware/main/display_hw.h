@@ -14,3 +14,8 @@ uint16_t *display_hw_acquire(void);
 
 /* Show a buffer returned by display_hw_acquire(). */
 void display_hw_present(uint16_t *fb);
+
+/* Panel backlight duty, 0..100 (%). Costs real battery - the backlight is one
+ * of the few loads here that's on continuously regardless of what the CPU is
+ * doing, so this is what the idle-dim in app.c's update_backlight() drives. */
+void display_hw_set_backlight(int percent);
