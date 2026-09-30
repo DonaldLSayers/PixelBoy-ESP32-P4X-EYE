@@ -117,6 +117,18 @@ esp_err_t input_init(void)
 {
     s_queue = xQueueCreate(16, sizeof(input_event_t));
 
+    /* A hold survives the reset that a deep sleep wakes from - the reason
+     * wifi_gallery_cp_release_hold() exists for the C6's reset pin, and IDF
+     * does the same thing to the wake pin itself: esp_deep_sleep_start() calls
+     * gpio_hold_en() on it (esp_hw_support's gpio_deep_sleep_wakeup_prepare).
+     * A held pad ignores what gpio_config() is about to write, so on the boot
+     * after any sleep the wake pin can come back up without a working pull-up;
+     * the next sleep then enters with that line floating, and a floating low is
+     * an instant wake - sleep, reboot, repeated. Released here so every sleep
+     * enters from the same clean state as the first one. Not an error if
+     * there's nothing to release: it's called on every boot. */
+    for (int i = 0; i < BTN_COUNT; i++) gpio_hold_dis((gpio_num_t)s_pins[i]);
+
     uint64_t mask = 0;
     for (int i = 0; i < BTN_COUNT; i++) mask |= 1ULL << s_pins[i];
     const gpio_config_t io = {

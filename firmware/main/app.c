@@ -34,6 +34,7 @@
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #endif
 #include <string.h>
 
@@ -2083,7 +2084,11 @@ esp_err_t app_init(void)
         ESP_LOGW(TAG, "boot: woke from deep sleep, gpio mask 0x%08llx",
                  (unsigned long long)esp_sleep_get_gpio_wakeup_status());
     else
-        ESP_LOGI(TAG, "boot: power-on or reset, not a sleep wake");
+        /* Both numbers, not just "not a sleep wake": a brownout (9) when the
+         * rails are cut and a panic (4) inside esp_deep_sleep_start() would
+         * otherwise read the same from here, and they need opposite fixes. */
+        ESP_LOGW(TAG, "boot: not a gpio sleep wake (cause=%d reset=%d)",
+                 (int)esp_sleep_get_wakeup_cause(), (int)esp_reset_reason());
 
     settings_load(&s_set);
     s_adjust = load_adjust(s_set.cam_mode);

@@ -188,5 +188,13 @@ void plat_enter_deep_sleep(void)
      * low and wake it straight back up. */
     esp_err_t wake_err = esp_deep_sleep_enable_gpio_wakeup(BIT64(PIN_BTN_SHUTTER), ESP_GPIO_WAKEUP_GPIO_LOW);
     if (wake_err != ESP_OK) PLOGE(TAG, "no deep sleep wake source: %s", esp_err_to_name(wake_err));
+
+    /* The level the wake comparator is about to see. If this reads 0 the sleep
+     * is over before it starts - the line is already in its wake condition, so
+     * the only thing left to work out is why (held low by something on the
+     * board, or floating with no working pull-up). Printed rather than acted
+     * on: refusing to sleep on a low would mean never sleeping at all if that
+     * turns out to be this pin's resting state. */
+    PLOGI(TAG, "sleeping: wake pin %d reads %d", PIN_BTN_SHUTTER, gpio_get_level(PIN_BTN_SHUTTER));
     esp_deep_sleep_start(); /* never returns - a wake is a full reset, same as power-on */
 }
