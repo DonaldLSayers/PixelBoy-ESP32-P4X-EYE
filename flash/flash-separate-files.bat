@@ -1,6 +1,7 @@
 @echo off
-REM PixelBoy - flash the individual images (same result as the merged one,
-REM just writes each file to its own offset).
+REM PixelBoy - flash the individual images (the same files the merged image is
+REM built from, just written to their own offsets - use this one to reflash only
+REM the app and leave the bootloader/partition table/C6 firmware alone).
 REM Usage:  flash-separate-files.bat [COMx]      (default COM23)
 setlocal
 set PORT=%1

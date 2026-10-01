@@ -1,8 +1,11 @@
-/* Diagnostic/bring-up only for now (see app_wifi_gallery.h) - checks
+/* The WiFi gallery: the first half (see wifi_gallery_diag()/main.c) checks
  * whether the onboard C6 is reachable over SDIO, and if it's running a
  * blank/stub image, pushes real coprocessor firmware to it over that same
- * link via ESP-Hosted's OTA API - no external adapter needed. Doesn't
- * bring up an AP or touch the gallery yet.
+ * link via ESP-Hosted's OTA API - no external adapter needed. The second half
+ * (wifi_gallery_start(), reached from the menu's WiFi Gallery row) is the
+ * gallery itself: a WPA2 AP on the fixed SSID/PASS below plus an HTTP server
+ * serving the /GBCAM photos and thumbnails to whatever joins it (see
+ * app.c's SCREEN_WIFI).
  *
  * esp_wifi_init() is called first (even though it may fail while the
  * coprocessor's still blank) rather than only the lower-level eh_host_init/

@@ -9,7 +9,7 @@
 /* Photos live in /sdcard/GBCAM. GB Camera photos are GBnnnnn.BIN (3584-byte
  * Game Boy 2bpp tiles, palette-free, used by the gallery) plus GBnnnnn.PNG
  * (4x upscale, shareable); photos pulled out of a GB emulator .sav (see
- * app_gbemu.c's export_photos_from_sav()) are the same pair of files but
+ * app_gbemu.c's pull_new_photos_from_sav()) are the same pair of files but
  * EMUnnnnn instead, so they're easy to tell apart on the card. Dither Cam
  * photos are DCnnnnn.PNG (full colour, nearest-neighbour upscaled by
  * DC_SAVE_SCALE - pixel art, so the upscale and PNG's lossless colours both
@@ -54,16 +54,14 @@ bool storage_save_aeb_extra(const uint8_t *shades, gbcam_palette_t palette, int 
  * buffer - see app_storage.c. */
 bool storage_save_aeb_extra_rgb(const uint8_t *rgb888, int number, int step);
 
-esp_err_t storage_load(int number, uint8_t *shades);
-
 /* True if some existing GB/EMU photo's raw tiles already match byte-for-byte
  * - see app_storage.c for why this has to be content-based, not slot-based. */
 bool storage_has_duplicate_gb_tiles(const uint8_t tiles[GBCAM_TILES_SIZE]);
 
 /* Decodes a saved GBnnnnn.PNG back to RGB888 for the gallery's framed 1:1
  * view - the palette and frame (if any) actually baked in at save time,
- * unlike storage_load()'s palette-free .BIN tiles. *out_rgb must be freed
- * with storage_free_dc(). */
+ * unlike the palette-free .BIN tiles. *out_rgb must be freed with
+ * storage_free_dc(). */
 esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *out_h);
 
 /* Dither Cam: nearest-neighbour upscaled by DC_SAVE_SCALE and saved as PNG.

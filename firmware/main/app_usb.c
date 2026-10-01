@@ -37,18 +37,24 @@ static bool s_webcam_active;
 static uint8_t *s_webcam_jpeg;
 static bool s_webcam_tx_busy;
 
-void usb_webcam_accept(void)
+/* True if webcam mode actually started. It can fail for exactly one reason -
+ * no PSRAM left for the ~126KB JPEG buffer (see s_webcam_jpeg) - and that has
+ * to reach the caller: the alternative is an on-screen "MIRROR ON" over a
+ * stream that will never send a frame, with nothing to retry from and no way
+ * for the user to tell. */
+bool usb_webcam_accept(void)
 {
     if (!s_webcam_jpeg) {
         s_webcam_jpeg = heap_caps_malloc(WEBCAM_JPEG_MAX_BYTES, MALLOC_CAP_SPIRAM);
         if (!s_webcam_jpeg) {
-            PLOGI(TAG, "webcam mode failed - out of PSRAM for JPEG buffer");
-            return;
+            PLOGE(TAG, "webcam mode failed - out of PSRAM for JPEG buffer");
+            return false;
         }
     }
     s_prompt = false;
     s_webcam_active = true;
     PLOGI(TAG, "webcam mode - streaming the GB Camera view over USB");
+    return true;
 }
 
 bool usb_webcam_active(void) { return s_webcam_active; }

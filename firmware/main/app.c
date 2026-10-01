@@ -1034,15 +1034,20 @@ void app_enter_sleep(void)
     plat_enter_deep_sleep(); /* cuts camera/LCD/SD power; wakes (as a fresh boot) on Shutter - never returns */
 }
 
-static void enter_gallery(void)
+/* True if the gallery actually opened. The false cases leave the caller's
+ * screen untouched on purpose: the camera is paused for the whole time the
+ * menu or the gallery is up, so a caller that had already switched to
+ * SCREEN_VIEWFINDER would land on a black viewfinder it can't come back from
+ * (nothing resumes the camera there) - see the ROW_GALLERY case. */
+static bool enter_gallery(void)
 {
     if (!storage_ready()) {
         osd_text("NO SD CARD", NULL);
-        return;
+        return false;
     }
     if (storage_count() == 0) {
         osd_text("NO PHOTOS", NULL);
-        return;
+        return false;
     }
     camera_pause();  /* nothing live to show browsing photos - see app_camera.h */
     s_screen = SCREEN_GALLERY;
@@ -1052,6 +1057,7 @@ static void enter_gallery(void)
     s_gallery_view = GALLERY_VIEW_CROP2X;
     s_gallery_dirty = true;
     s_delete_armed_until_us = 0;
+    return true;
 }
 
 static void leave_gallery(void)
@@ -1593,9 +1599,12 @@ static void activate_menu_row(void)
         settings_changed(&s_set);
         break;
     case ROW_GALLERY:
-        s_screen = SCREEN_VIEWFINDER; /* enter_gallery() switches it again if it succeeds */
-        enter_gallery();
-        return;
+        /* Stay on the menu (camera still paused, message up) if it can't open -
+         * the old "assume success and set the screen first" version left the
+         * device on SCREEN_VIEWFINDER with the camera paused and nothing that
+         * would ever resume it. */
+        if (enter_gallery()) return;
+        break;
     case ROW_WIFI:
         /* camera_pause() already happened entering the menu - stays paused
          * behind this screen, same as ROW_GALLERY, until handle_wifi_input()
@@ -1616,8 +1625,29 @@ static void activate_menu_row(void)
     }
 }
 
+/* Webcam mode (mirror or GB) has no screen of its own, so its off switch rides
+ * on Menu's long press, which is otherwise unused on every screen it can be
+ * running behind. Menu-hold from the viewfinder would normally open the gallery
+ * and in the gallery would normally re-select a photo - while a stream is live
+ * it stops the stream instead (the gallery is still one menu row away).
+ *
+ * Not optional: without it the only ways out are the host releasing the
+ * device or a replug, and usb_msc_tick()'s tud_mounted() check can't see a
+ * bare cable pull (see there) - so a webcam session could sit there
+ * streaming to a PC that isn't even connected, which is also what keeps
+ * app_sleep_due()/standby_allowed() refusing to idle. Returns true if the
+ * press was the exit gesture, so the caller doesn't also act on it. */
+static bool webcam_exit_long_press(const input_event_t *ev)
+{
+    if (ev->type != INPUT_LONG_PRESS || ev->button != BTN_MENU || !usb_webcam_active()) return false;
+    usb_webcam_exit();
+    osd_brief("WEBCAM OFF");
+    return true;
+}
+
 static void handle_menu_input(const input_event_t *ev)
 {
+    if (webcam_exit_long_press(ev)) return;
     if (ev->type == INPUT_ROTATE) {
         int v = s_menu_sel + ev->value;
         s_menu_sel = v < 0 ? 0 : v > s_menu_count - 1 ? s_menu_count - 1 : v;
@@ -1766,6 +1796,8 @@ static void rotate_viewfinder(int detents)
 
 static void handle_viewfinder_input(const input_event_t *ev)
 {
+    if (webcam_exit_long_press(ev)) return;
+
     if (usb_msc_prompt_pending()) {
         /* Steals input while the prompt is up, same as a normal button click
          * still would - a photo shouldn't fire underneath it. */
@@ -1783,13 +1815,13 @@ static void handle_viewfinder_input(const input_event_t *ev)
              * the menu, the gallery...) to USB alongside normal use. See
              * usb_webcam_feed_screen() and app_usb.h's comment. */
             s_webcam_mirror = true;
-            usb_webcam_accept();
-            osd_brief("MIRROR ON");
+            if (usb_webcam_accept()) osd_brief("MIRROR ON");
+            else osd_text("WEBCAM FAILED", NULL); /* no PSRAM for the JPEG buffer - see app_usb.c */
         } else if (ev->type == INPUT_CLICK && ev->button == BTN_MODE) {
             /* GB Webcam: just the photo (+ frame, if on), see usb_webcam_feed_gb(). */
             s_webcam_mirror = false;
-            usb_webcam_accept();
-            osd_brief("GB WEBCAM ON");
+            if (usb_webcam_accept()) osd_brief("GB WEBCAM ON");
+            else osd_text("WEBCAM FAILED", NULL);
         } else if (ev->type == INPUT_CLICK && ev->button == BTN_SHUTTER) {
             usb_msc_decline();
         }
@@ -1836,6 +1868,7 @@ static void handle_viewfinder_input(const input_event_t *ev)
 
 static void handle_gallery_input(const input_event_t *ev)
 {
+    if (webcam_exit_long_press(ev)) return;
     if (ev->type == INPUT_ROTATE) {
         int pos = s_gallery_pos + ev->value;
         int max = storage_count() - 1;
@@ -1917,23 +1950,32 @@ static void log_stats(void)
 }
 
 /* Edge-triggered so it warns once per drop below the threshold, not every
- * frame - and can warn again on a later drop (e.g. it recovered because the
- * board got plugged in to charge, then was unplugged and ran back down). */
+ * call - and can warn again on a later drop (e.g. it recovered because the
+ * board got plugged in to charge, then was unplugged and ran back down).
+ *
+ * The edge itself lives here rather than in the two places that show it
+ * because both loops need the same answer: app_step() below, and the
+ * emulator's own loop, which never reaches app_step() at all (see
+ * app_gbemu.c's run_rom()) and is where the battery drains fastest. */
 #define LOW_BATTERY_PCT 15
 static bool s_low_battery_warned;
 
-static void check_low_battery(void)
+bool app_low_battery_edge(void)
 {
     int pct = plat_battery_percent();
-    if (pct < 0) return; /* no gauge to read - nothing to warn about */
-    if (pct <= LOW_BATTERY_PCT) {
-        if (!s_low_battery_warned) {
-            s_low_battery_warned = true;
-            osd_text("LOW BATTERY", NULL);
-        }
-    } else {
+    if (pct < 0) return false; /* no gauge to read - nothing to warn about */
+    if (pct > LOW_BATTERY_PCT) {
         s_low_battery_warned = false;
+        return false;
     }
+    if (s_low_battery_warned) return false;
+    s_low_battery_warned = true;
+    return true;
+}
+
+static void check_low_battery(void)
+{
+    if (app_low_battery_edge()) osd_text("LOW BATTERY", NULL);
 }
 
 static void viewfinder_frame(void)
@@ -1944,7 +1986,6 @@ static void viewfinder_frame(void)
         s_stats.skipped++;
         return;
     }
-    check_low_battery();
     s_next_frame_us = (s_next_frame_us && t0 - s_next_frame_us < FRAME_INTERVAL_US)
                           ? s_next_frame_us + FRAME_INTERVAL_US : t0 + FRAME_INTERVAL_US;
 
@@ -2046,7 +2087,29 @@ static void extract_plain_photo(const uint8_t *rgb, int w, int h)
  * picking one sample per GB_PNG_SCALE x GB_PNG_SCALE block (already solid
  * colour, from the original nearest-neighbour upscale) into s_frame_rgb,
  * reused here since its size (the biggest canvas, Wild frames) covers every
- * case. w/h out are the resulting native size. */
+ * case. w/h out are the resulting native size.
+ *
+ * Only valid for one of the three sizes storage_save() writes - see
+ * saved_png_size_known(), which the caller checks first. Anything else here
+ * writes past the end of s_frame_rgb by construction. */
+
+/* The three sizes a saved GB photo can be: the unframed 128x112 canvas, or a
+ * framed one at *the frame canvas' 160 width, 144 or 224 tall (frames.h's two
+ * supported heights), all at GB_PNG_SCALE. Both downscale_to_native() and
+ * extract_plain_photo() index a photo with fixed offsets sized for exactly
+ * these, so a .PNG that is none of them - a hand-made file dropped into
+ * /GBCAM over the USB MSC drive it's presented as, or a corrupt one - has to
+ * be shown whole instead of through either. Both of those read from a buffer
+ * the decoder sized from the file's own dimensions, so an unrecognised size is
+ * not a read bug; it's the fixed-size s_frame_rgb/s_gallery_plain_rgb writes
+ * and the fixed crop offsets that don't hold. */
+static bool saved_png_size_known(int w, int h)
+{
+    if (w == GBCAM_W * GB_PNG_SCALE && h == GBCAM_H * GB_PNG_SCALE) return true;
+    if (w == 160 * GB_PNG_SCALE && (h == 144 * GB_PNG_SCALE || h == 224 * GB_PNG_SCALE)) return true;
+    return false;
+}
+
 static void downscale_to_native(const uint8_t *rgb, int w, int h, int *out_w, int *out_h)
 {
     int nw = w / GB_PNG_SCALE, nh = h / GB_PNG_SCALE;
@@ -2145,7 +2208,14 @@ static void gallery_frame(void)
         uint8_t *rgb;
         int w, h;
         if (storage_load_gb_png(number, &rgb, &w, &h) == ESP_OK) {
-            if (s_gallery_view == GALLERY_VIEW_FIT) {
+            if (!saved_png_size_known(w, h)) {
+                /* Not a photo this firmware wrote - show it whole (the one
+                 * generic path) rather than through the fixed offsets below,
+                 * and say so: this is a file on a card that is also a USB
+                 * drive, so it's something the user can act on. */
+                PLOGW(TAG, "photo #%d is %dx%d, not a saved photo size - showing it scaled to fit", number, w, h);
+                display_begin_camera(rgb, w, h, true);
+            } else if (s_gallery_view == GALLERY_VIEW_FIT) {
                 display_begin_camera(rgb, w, h, true);
             } else if (s_gallery_view == GALLERY_VIEW_NATIVE1X) {
                 int nw, nh;
@@ -2479,8 +2549,9 @@ esp_err_t app_init(void)
     /* camera_ppa_init(); - disabled for now: real hardware showed visible
      * corruption (right/bottom of frame) with no measurable speed win over
      * the CPU path either, so this isn't earning its risk yet. Code stays
-     * in place (camera_ppa_esp.c) for a more careful follow-up pass -
-     * needs figuring out why before it's worth turning back on. */
+     * in place (camera_ppa_esp.c, and its include above is kept for this one
+     * line) for a more careful follow-up pass - needs figuring out why before
+     * it's worth turning back on. */
 
     boot_stamp(); /* camera */
     /* Printed here, before resume_apply() below: that call blocks for as long as
@@ -2600,6 +2671,9 @@ void app_step(void)
     if (input_pending()) s_last_input_us = now_us();
     update_standby();
     update_backlight();
+    /* Every screen, not just the viewfinder it used to be called from - see
+     * its own comment. Cheap: one battery ADC read per app_step(). */
+    check_low_battery();
 
     /* Unconditionally, once per iteration: this call is what expires the
      * wake-touch window, so it must not live inside the drain below (see

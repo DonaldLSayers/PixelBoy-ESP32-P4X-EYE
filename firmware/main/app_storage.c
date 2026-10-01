@@ -152,7 +152,7 @@ static void write_thumbnail(const char *prefix, int number, const uint8_t *rgb88
 }
 
 /* GB Camera's own captures are GBnnnnn, photos pulled out of a GB emulator
- * .sav (see app_gbemu.c's export_photos_from_sav()) are EMUnnnnn - both
+ * .sav (see app_gbemu.c's pull_new_photos_from_sav()) are EMUnnnnn - both
  * live in the same BIN/ subfolder and share one numbering sequence, just
  * distinguished by this prefix. Matches name against prefix case-
  * insensitively, then parses the number/extension after it. */
@@ -467,20 +467,6 @@ bool storage_save_aeb_extra_rgb(const uint8_t *rgb888, int number, int step)
     return ok;
 }
 
-esp_err_t storage_load(int number, uint8_t *shades)
-{
-    char path[300];
-    static uint8_t tiles[GBCAM_TILES_SIZE];
-    bin_path_for(path, sizeof path, gb_prefix_for(number), number);
-    FILE *f = fopen(path, "rb");
-    if (!f) return ESP_ERR_NOT_FOUND;
-    size_t n = fread(tiles, 1, sizeof tiles, f);
-    fclose(f);
-    if (n != sizeof tiles) return ESP_ERR_INVALID_SIZE;
-    gbcam_tiles_to_shades(tiles, shades);
-    return ESP_OK;
-}
-
 /* Byte-for-byte match against every existing GB/EMU photo's .BIN (skips DC,
  * which has no .BIN) - used by app_gbemu.c's "pull new photos" to tell a
  * genuinely new capture apart from one it's already saved. Content-based
@@ -570,11 +556,10 @@ esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h)
     return ESP_OK;
 }
 
-/* Decodes a saved GBnnnnn.PNG back to RGB888 - unlike storage_load()'s .BIN
- * tiles, this is the actual upscaled export: whatever palette and frame (if
- * any) the photo was saved with, baked in, not the .BIN's palette-free
- * shades re-rendered with whatever's currently selected. Frees the same way
- * as storage_load_dc(). */
+/* Decodes a saved GBnnnnn.PNG back to RGB888 - the actual upscaled export:
+ * whatever palette and frame (if any) the photo was saved with, baked in,
+ * not the .BIN's palette-free shades re-rendered with whatever's currently
+ * selected. Frees the same way as storage_load_dc(). */
 esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *out_h)
 {
     char path[300];

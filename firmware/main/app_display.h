@@ -15,9 +15,6 @@
 
 esp_err_t display_init(void);
 
-/* Start a new frame: draws the image (shades 0..3) with the given palette. */
-void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette);
-
 /* Viewfinder layout, like the Game Boy Camera's shooting screen: the photo at 2x
  * (x 16..239, y 0..223, showing source columns 8..119), a vertical brightness
  * bar on the left (+ at the top) and a horizontal contrast bar along the bottom

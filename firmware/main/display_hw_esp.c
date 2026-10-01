@@ -115,10 +115,10 @@ void display_hw_present(uint16_t *fb)
 void display_hw_set_backlight(int percent)
 {
     /* bsp_display_brightness_set() has its own LEDC 0..100 clamp and the
-     * "Setting LCD backlight: N%" INFO log on every call - at the idle-dim
-     * cadence this is called on every input event, so only actually touch the
-     * duty when the value changes, both to keep the log quiet and to skip a
-     * pointless LEDC write on every encoder detent. */
+     * "Setting LCD backlight: N%" INFO log on every call - update_backlight()
+     * calls this on every loop iteration, so only actually touch the duty when
+     * the value changes, both to keep the log quiet and to skip a pointless
+     * LEDC write on every encoder detent. */
     static int s_last = -1;
     if (percent == s_last) return;
     s_last = percent;

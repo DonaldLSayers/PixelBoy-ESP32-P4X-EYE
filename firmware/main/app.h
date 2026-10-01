@@ -56,6 +56,14 @@ bool app_sleep_due(int64_t idle_us);
  * have nothing to resume anyway. */
 void app_resume_note_gbemu(const char *rom_path, int slot, bool state_saved);
 
+/* True once, on the minute the battery crosses below the low-battery
+ * threshold - app_step() shows it as an OSD, and the emulator loop does the
+ * same with its own (see run_rom()). Both need the same edge, and each
+ * separately calling the gauge would mean two warnings for one drop, so the
+ * latch is here. False again after the board charges back above the
+ * threshold, so a second drop warns too. */
+bool app_low_battery_edge(void);
+
 /* Whether this iteration's input should be discarded: true from a deep-sleep
  * GPIO wake until the button that caused it has been seen and released. A wake
  * is a reset, so the finger that pressed Shutter may still be down when the

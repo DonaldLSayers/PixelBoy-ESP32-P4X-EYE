@@ -8,10 +8,13 @@
  * not on the (simple) resample arithmetic itself - PPA does the whole crop+
  * scale+convert as a single hardware DMA operation instead.
  *
- * Registered once at boot (see app.c's app_init()) via dc_set_hw_resample();
- * dithercam.c's dc_sample()/dc_sample_smooth() call back into camera_ppa_resample()
- * below for every frame, falling back to their own CPU loop if it returns
- * false (not yet initialized, or an unsupported source pixel format).
+ * Currently dormant: camera_ppa_init() is commented out in app.c's app_init()
+ * (it is also what registers camera_ppa_resample() with dithercam via
+ * dc_set_hw_resample(), so that hook is unset too), because real hardware
+ * showed visible corruption (right/bottom of frame) for no measurable speed
+ * win over the CPU path - so camera_ppa_scale_to_rgb565() returns false and
+ * its caller falls back to the CPU path. Kept for a more careful follow-up
+ * pass (see the note in app_init()).
  */
 #include <string.h>
 

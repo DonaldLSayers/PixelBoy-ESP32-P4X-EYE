@@ -395,6 +395,31 @@ static void pull_all_new_photos(void)
     plat_sleep_ms(1200);
 }
 
+/* The two pickers are blocking loops of their own, so they need the same idle
+ * policy run_rom() applies (see the standby block there) - without it the
+ * backlight stayed on for as long as a list was left on screen, and the SLEEP
+ * timer did nothing here at all, so a device left on the ROM list never went
+ * down. Called once per turn of either picker loop, after that loop's own
+ * input drain has refreshed *last_input_us.
+ *
+ * True means "this picker is over, unwind" - only ever for the deep sleep,
+ * which is a reset and never returns here (app_enter_sleep() writes the
+ * resume record as VIEWFINDER, which is right: a list is not a session, so
+ * the next wake belongs on the camera). The standby state itself is handed
+ * back so the caller can swallow the touch that wakes the dark screen, the
+ * same rule run_rom() follows. */
+static bool picker_idle_poll(int64_t *last_input_us, bool *in_standby)
+{
+    int64_t idle_us = plat_now_us() - *last_input_us;
+    if (app_sleep_due(idle_us)) {
+        app_enter_sleep(); /* never returns - see app.h */
+        return true;
+    }
+    *in_standby = app_standby_due(idle_us);
+    display_set_backlight(*in_standby ? 0 : app_backlight_percent());
+    return false;
+}
+
 /* Simple scrollable text list - encoder scrolls, Shutter picks, Menu click
  * cancels. Row 0 is always the synthetic "PULL NEW PHOTOS" action (see
  * pull_all_new_photos()); real ROMs start at row 1. Returns the chosen path
@@ -405,6 +430,11 @@ static bool pick_rom(char *out_path, size_t out_len)
     const int rows_visible = (DISP_H - 40) / row_h;
     const int row_count = s_rom_count + 1; /* +1 for the PULL NEW PHOTOS row */
     int sel = 0, scroll = 0;
+    /* Idle handling for this list - see picker_idle_poll(). last_input_us is
+     * this loop's own clock, not the emulator's or app_step()'s: neither of
+     * those is running while this blocks. */
+    int64_t last_input_us = plat_now_us();
+    bool in_standby = false, swallow_press = false;
 
     for (;;) {
         display_begin_blank(0, 0, 0);
@@ -427,6 +457,14 @@ static bool pick_rom(char *out_path, size_t out_len)
 
         input_event_t ev;
         while (input_get(&ev, 20)) {
+            last_input_us = plat_now_us();
+            /* A touch into a dark screen is spent waking it, not picking with
+             * it - and the whole touch, not just the press, so its click can't
+             * land as a selection either (same rule as run_rom()'s drain). */
+            if (in_standby || swallow_press) {
+                swallow_press = true;
+                continue;
+            }
             if (ev.type == INPUT_ROTATE) {
                 sel += ev.value;
                 if (sel < 0) sel = 0;
@@ -447,14 +485,16 @@ static bool pick_rom(char *out_path, size_t out_len)
                 return false;
             }
         }
+        if (swallow_press && !input_any_held() && !input_pending()) swallow_press = false;
+        if (picker_idle_poll(&last_input_us, &in_standby)) return false;
     }
 }
 
 /* --------------------------------------------------------------- save slots */
-
 /* Builds "<rom, minus its .gb/.gbc extension>.sav" for slot 1, or
- * "....2.sav" / "....3.sav" for slots 2/3 - sits right next to the ROM on
- * the SD card, same convention as every other GB emulator's battery saves. */
+ * "....N.sav" for any higher slot N (up to GBCAM_MAX_SAVE_SLOTS - see
+ * pick_save_slot()) - sits right next to the ROM on the SD card, same
+ * convention as every other GB emulator's battery saves. */
 static void sav_path_for(const char *rom_path, int slot, char *out, size_t out_len)
 {
     char base[280];
@@ -559,7 +599,8 @@ static int pull_new_photos_from_sav(const char *sav_path)
 
 /* Every slot up to and including the first non-existent one, so the list
  * always ends with exactly one "NEW SAVE" row past however many saves
- * already exist - no fixed cap, just keeps growing as you make more. */
+ * already exist - no fixed list to maintain, just keeps growing as you make
+ * more, up to GBCAM_MAX_SAVE_SLOTS (the row after that stops being offered). */
 static int count_save_slots(const char *rom_path)
 {
     int n = 1;
@@ -587,6 +628,8 @@ static bool pick_save_slot(const char *rom_path, char *out_sav_path, size_t out_
     const int row_h = 18;
     const int rows_visible = (DISP_H - 56) / row_h; /* leaves room for the footer hint below */
     int sel = 0, scroll = 0;
+    int64_t last_input_us = plat_now_us(); /* this loop's own idle clock - see picker_idle_poll() */
+    bool in_standby = false, swallow_press = false;
     for (;;) {
         int slot_count = count_save_slots(rom_path);
         if (sel > slot_count - 1) sel = slot_count - 1;
@@ -617,6 +660,13 @@ static bool pick_save_slot(const char *rom_path, char *out_sav_path, size_t out_
 
         input_event_t ev;
         while (input_get(&ev, 20)) {
+            last_input_us = plat_now_us();
+            /* Same rule as pick_rom()'s drain: a touch into a dark screen
+             * wakes it instead of picking a slot with it. */
+            if (in_standby || swallow_press) {
+                swallow_press = true;
+                continue;
+            }
             if (ev.type == INPUT_ROTATE) {
                 sel += ev.value;
                 if (sel < 0) sel = 0;
@@ -633,6 +683,8 @@ static bool pick_save_slot(const char *rom_path, char *out_sav_path, size_t out_
                 return false;
             }
         }
+        if (swallow_press && !input_any_held() && !input_pending()) swallow_press = false;
+        if (picker_idle_poll(&last_input_us, &in_standby)) return false;
     }
 }
 
@@ -954,13 +1006,19 @@ static void rom_teardown(struct gb_s *gb, gbemu_ctx_t *ctx, const char *sav_path
     free(ctx->rgb888);
 }
 
-static void run_rom(const char *rom_path, const char *sav_path, int slot)
+/* True if a session actually ran (and however it ended - Menu-hold, or the
+ * SLEEP timer, which never returns at all). False every way this can bail
+ * before the loop starts: unreadable/empty/short ROM, out of memory, or a
+ * .state too corrupt to run against. gbemu_run_rom() relays that to the
+ * resume path, which needs to know whether to claim the emulator as the
+ * screen it woke into (see app.c's resume_apply()). */
+static bool run_rom(const char *rom_path, const char *sav_path, int slot)
 {
     ESP_LOGW(TAG, "loading %s", rom_path);
     FILE *f = fopen(rom_path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "couldn't open %s", rom_path);
-        return;
+        return false;
     }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
@@ -968,7 +1026,7 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
     if (size <= 0) {
         ESP_LOGE(TAG, "empty ROM file");
         fclose(f);
-        return;
+        return false;
     }
 
     gbemu_ctx_t ctx = {0};
@@ -982,7 +1040,7 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
         free(ctx.rom);
         free(ctx.cart_ram);
         free(ctx.rgb888);
-        return;
+        return false;
     }
     size_t read = fread(ctx.rom, 1, ctx.rom_size, f);
     fclose(f);
@@ -991,7 +1049,7 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
         free(ctx.rom);
         free(ctx.cart_ram);
         free(ctx.rgb888);
-        return;
+        return false;
     }
 
     /* Identity for save states (see gb_state_hdr_t) - the ROM's own bytes, not
@@ -1015,7 +1073,7 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
         free(ctx.rom);
         free(ctx.cart_ram);
         free(ctx.rgb888);
-        return;
+        return false;
     }
     gb_init_lcd(&gb, lcd_draw_line_cb);
 
@@ -1092,7 +1150,7 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
          * safe to run and nothing trustworthy to save, so the .sav is left
          * exactly as it was found and the session ends here. */
         rom_teardown(&gb, &ctx, sav_path, false);
-        return;
+        return false;
     }
     if (resumed == GB_STATE_OK) {
         osd_msg = "RESUMED";
@@ -1247,6 +1305,17 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
             continue;
         }
 
+        /* The low-battery warning app_step() shows, which this loop would
+         * otherwise never see at all - and a game running for hours is exactly
+         * where the battery gets low. Checked here, after the standby skip, so
+         * a drop that happens while the screen is dark is still waiting to be
+         * shown when it comes back on rather than being spent on a blank
+         * panel. Same overlay mechanism as RESUMED above. */
+        if (app_low_battery_edge()) {
+            osd_msg = "LOW BATTERY";
+            osd_until_us = plat_now_us() + 2000000;
+        }
+
         gb_run_frame(&gb);
         vTaskDelay(1); /* safety net for the watchdog task's own feed */
 
@@ -1329,10 +1398,11 @@ static void run_rom(const char *rom_path, const char *sav_path, int slot)
          * had to be written above. The game's last frame is still underneath
          * the SLEEPING message app_enter_sleep() draws. */
         app_enter_sleep();
-        return; /* not reached - see app.h */
+        return true; /* not reached - see app.h */
     }
 
     ESP_LOGW(TAG, "exited");
+    return true;
 }
 
 bool gbemu_run_rom(const char *rom_path, int slot)
@@ -1353,8 +1423,7 @@ bool gbemu_run_rom(const char *rom_path, int slot)
     }
     char sav_path[300];
     sav_path_for(rom_path, slot, sav_path, sizeof sav_path);
-    run_rom(rom_path, sav_path, slot);
-    return true;
+    return run_rom(rom_path, sav_path, slot);
 }
 
 void gbemu_run(void)
