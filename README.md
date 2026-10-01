@@ -145,6 +145,8 @@ are copyrighted - never commit one (see `.gitignore`).
 
 ## Build and flash
 
+Note(you can easily flash with the latest release with my ([web flasher](https://pixelboy.donaldsayers.com).
+
 Needs **ESP-IDF v5.5.5**.
 
 ### Day to day (P4 firmware)
