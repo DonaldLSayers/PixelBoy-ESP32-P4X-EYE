@@ -6,8 +6,9 @@ over up to 64 palette colours per pixel - the difference between comfortably
 hitting 15 fps on the ESP32-P4 and not, at the largest resolution/palette
 combos.
 
-Reads the same source .hex files as tools/gen_palettes.py (not the generated
-palettes_data.h) so this is independent of that script's run order, and uses
+Reads the same source .hex files as tools/gen_palettes.py (assets/palettes/
+dithercam/*.hex, not the generated palettes_data.h) so this is independent of
+that script's run order, and uses
 the exact same weighted distance dithercam.c's nearest() uses (2*dr^2+4*dg^2+
 3*db^2), so the LUT always agrees with what a full scan would have picked at
 each bucket's representative colour.
@@ -23,7 +24,7 @@ import os
 import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, "PIXEL CAM", "xiao-pixelcam", "sd_card", "palettes", "dithercam")
+SRC = os.path.join(ROOT, "assets", "palettes", "dithercam")
 OUT = os.path.join(ROOT, "components", "gbcam", "src", "dc_lut_data.h")
 
 LUT_BITS = 5

@@ -23,9 +23,6 @@ samples/
 *.sav
 *.sav.exported
 
-# PIXEL CAM is its own separate git repo (github.com/DonaldLSayers/PixelBoy) -
-# not part of this one.
-PIXEL CAM/
 **/__pycache__/
 WIN_20260924_13_49_34_Pro.jpg
 

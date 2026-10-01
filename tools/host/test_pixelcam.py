@@ -1,11 +1,12 @@
 """
 Checks the gbcam C core's PIXEL CAM style against the original Python
-implementation in "PIXEL CAM/pixelboy/dither.py" (dither_gbcam), on the same
-128x112 greyscale images with fixed levels, pattern and light table.
+implementation (dither.py's dither_gbcam), on the same 128x112 greyscale
+images with fixed levels, pattern and light table.
 
     python tools/host/test_pixelcam.py
 
-Needs gbcam.dll (tools/host/build.ps1), numpy and Pillow.
+Needs gbcam.dll (tools/host/build.ps1), numpy, Pillow, and the Python
+reference implementation - see ref_impl.py.
 """
 import ctypes
 import os
@@ -16,8 +17,10 @@ import numpy as np
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(ROOT, "PIXEL CAM"))
+sys.path.insert(0, HERE)
+import ref_impl  # noqa: E402
+
+ref_impl.add_to_path()
 from pixelboy import dither as pb  # noqa: E402
 
 W, H = 128, 112

@@ -1,14 +1,15 @@
 """
-Checks the gbcam C core's Dither Cam against the original Python in
-"PIXEL CAM/pixelboy/dithercam.py" (the pure-Python _quantize_* reference
-versions), on the same RGB images with the same palette/method/levels.
+Checks the gbcam C core's Dither Cam against the original Python
+implementation (dithercam.py's pure-Python _quantize_* reference versions),
+on the same RGB images with the same palette/method/levels.
 
     python tools/host/test_dithercam.py
 
 The error-diffusion methods run in float32 here and float64 in Python, so a
 handful of pixels can land on a different (equally close) colour after the
 error has travelled across the image; those are reported, and anything above
-0.5% counts as a failure.
+0.5% counts as a failure. Needs the Python reference implementation - see
+ref_impl.py.
 """
 import ctypes
 import os
@@ -19,7 +20,10 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(ROOT, "PIXEL CAM"))
+sys.path.insert(0, HERE)
+import ref_impl  # noqa: E402
+
+ref_impl.add_to_path()
 from pixelboy import dithercam as dc  # noqa: E402
 
 METHODS = ["none", "bayer4", "bayer8", "floyd_steinberg", "atkinson", "sierra_lite"]
@@ -31,7 +35,7 @@ PY = {
     "atkinson": dc._quantize_atkinson_py,
     "sierra_lite": dc._quantize_sierra_lite_py,
 }
-PAL_DIR = os.path.join(ROOT, "PIXEL CAM", "xiao-pixelcam", "sd_card", "palettes", "dithercam")
+PAL_DIR = os.path.join(ROOT, "assets", "palettes", "dithercam")
 
 
 def main():

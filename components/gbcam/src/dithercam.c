@@ -1,6 +1,7 @@
 /*
- * Dither Cam, ported from the PIXEL CAM project: pixelboy/dithercam.py
- * (quantize, _quantize_*) and xiao-pixelcam/src/dithercam.cpp.
+ * Dither Cam, ported from the PIXEL CAM project's two implementations:
+ * its Python dithercam.py (quantize, _quantize_*) and its C++
+ * dithercam.cpp.
  */
 #include <math.h>
 #include <stdlib.h>

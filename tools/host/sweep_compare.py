@@ -1,12 +1,13 @@
 """
 Contrast sweep comparison on a photo: all 16 contrast levels in
   - gbcam PIXEL CAM style (C core, what the camera runs)
-  - the original PIXEL CAM Python (PIXEL CAM/pixelboy/dither.py)
+  - the original PIXEL CAM Python (dither.py)
   - gbcam HARDWARE style (C core)
 
     python tools/host/sweep_compare.py <photo> [-o out.png] [--mirror]
 
-Needs gbcam.dll (tools/host/build.ps1), numpy, Pillow, OpenCV.
+Needs gbcam.dll (tools/host/build.ps1), numpy, Pillow, OpenCV, and the Python
+reference implementation - see ref_impl.py.
 """
 import argparse
 import os
@@ -18,7 +19,10 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(ROOT, "PIXEL CAM"))
+sys.path.insert(0, HERE)
+import ref_impl  # noqa: E402
+
+ref_impl.add_to_path()
 from pixelboy import dither as pb  # noqa: E402
 
 import gbcam_live as g  # noqa: E402

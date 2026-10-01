@@ -1,7 +1,7 @@
 /*
- * PIXEL CAM style: the GB mode of the PIXEL CAM project
- * (PIXEL CAM/pixelboy/dither.py - dither_gbcam(), _apply_levels(),
- * search_best_levels()), ported to C.
+ * PIXEL CAM style: the GB mode of the PIXEL CAM project, ported to C from
+ * its Python implementation (dither_gbcam(), _apply_levels(),
+ * search_best_levels()).
  *
  *   gray  -> contrast pivot around mid-grey, clip, gamma      (_apply_levels)
  *         -> 128 + gray / 2 into the ROM thresholds' domain

@@ -1,6 +1,6 @@
 /*
  * Dither Cam - arbitrary-palette pixel art, ported from the PIXEL CAM
- * project (pixelboy/dithercam.py quantize() and xiao-pixelcam/src/dithercam.cpp).
+ * project (its Python dithercam.py quantize() and its C++ dithercam.cpp).
  *
  *   camera frame -> centre crop to the target aspect -> nearest-neighbour
  *   downscale (crisp, like dithercam.py's Image.NEAREST) -> contrast pivot +

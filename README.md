@@ -213,6 +213,7 @@ enhancement, cleaner).
 assets/icons       menu row icons, 16x16 PNG (edit, then run tools/gen_icons.py)
 assets/frames      GB Camera border art, 160x144/160x224 PNG
 assets/fonts       menu font source (tools/gen_font.py)
+assets/palettes    built-in palette .hex sources (tools/gen_palettes.py, gen_dc_lut.py)
 components/gbcam   portable image core (PC + firmware)
 components/peanut_gb  vendored Game Boy emulator core (single header)
 components/stb     PNG writer

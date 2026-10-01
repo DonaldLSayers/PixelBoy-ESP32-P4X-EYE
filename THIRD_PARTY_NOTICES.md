@@ -22,9 +22,9 @@ dither patterns) rather than raw pre-dither exposure data.
 
 ## Colour palettes
 
-Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xiao-pixelcam/sd_card/palettes/`) - almost all from [Lospec](https://lospec.com/palette-list), the pixel-art palette database; credited below to whoever Lospec itself credits (a named artist, or the hardware/software a palette is drawn from, where that's how Lospec lists it). Each is free to use/redistribute per Lospec's site-wide terms, but the individual artist's name should stay attached - hence this table.
+Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `assets/palettes/`) - almost all from [Lospec](https://lospec.com/palette-list), the pixel-art palette database; credited below to whoever Lospec itself credits (a named artist, or the hardware/software a palette is drawn from, where that's how Lospec lists it). Each is free to use/redistribute per Lospec's site-wide terms, but the individual artist's name should stay attached - hence this table.
 
-### GB Camera palettes (`palettes/gb/`, always 4 colours)
+### GB Camera palettes (`assets/palettes/gb/`, always 4 colours)
 
 | File | Palette | Credit | Source |
 |---|---|---|---|
@@ -47,7 +47,7 @@ Built-in palettes (`tools/gen_palettes.py`, source `.hex` files in `PIXEL CAM/xi
 | `spacehaze` | SpaceHaze | WildLeoKnight | https://lospec.com/palette-list/spacehaze |
 | `wish_gb` | Wish GB | Kerrie Lake | https://lospec.com/palette-list/wish-gb |
 
-### Dither Cam palettes (`palettes/dithercam/`, 2-64 colours)
+### Dither Cam palettes (`assets/palettes/dithercam/`, 2-64 colours)
 
 `2bit_demichrome` and `crimson` are shared with the GB Camera list above (same file, same credit).
 
