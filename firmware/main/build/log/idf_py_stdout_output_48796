@@ -1,4 +1,0 @@
-Command: cmake -G Ninja -DPYTHON_DEPS_CHECKED=1 -DPYTHON=C:\Users\donaldsayers\.espressif\python_env\idf5.5_py3.14_env\Scripts\python.exe -DESP_PLATFORM=1 -DCCACHE_ENABLE=1 E:\PIXELBOY\firmware\main
--- The C compiler identification is unknown
--- The CXX compiler identification is unknown
--- Configuring incomplete, errors occurred!
