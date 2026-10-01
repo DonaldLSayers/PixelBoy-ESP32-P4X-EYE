@@ -15,9 +15,6 @@
 
 esp_err_t display_init(void);
 
-/* Start a new frame: draws the image (shades 0..3) with the given palette. */
-void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette);
-
 /* Viewfinder layout, like the Game Boy Camera's shooting screen: the photo at 2x
  * (x 16..239, y 0..223, showing source columns 8..119), a vertical brightness
  * bar on the left (+ at the top) and a horizontal contrast bar along the bottom
@@ -142,3 +139,13 @@ void display_end_frame(void);
  * valid until the next display_begin_*() call. Used for USB "mirror mode"
  * (see usb_webcam_feed() in app_usb.h) - not needed for normal rendering. */
 const uint16_t *display_last_frame(void);
+
+/* Panel backlight duty, 0..100 (%) - the BACKLIGHT setting and standby both go
+ * through here (see update_backlight()/ROW_BACKLIGHT in app.c). Pixel content
+ * is untouched: this is only the LED behind the panel. */
+void display_set_backlight(int percent);
+
+/* Panel sleep-in and backlight off, for the walk into deep sleep only - the
+ * last display call before the rail is cut. Like everything else on that path
+ * it has no counterpart: a wake is a full reset. */
+void display_sleep(void);

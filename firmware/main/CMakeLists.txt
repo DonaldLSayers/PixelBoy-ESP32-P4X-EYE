@@ -38,8 +38,8 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=format-truncation)
 # that #includes it. CONFIG_COMPILER_OPTIMIZATION_PERF (sdkconfig.defaults)
 # already builds the whole project at -O2; bumping just this file to -O3 is a
 # free, isolated win for the actual CPU/PPU emulation hot loop (gb_run_frame())
-# without touching the rest of the app's build. Real per-frame timing showed
-# it consistently over the Game Boy's own 16.7ms frame budget on its own (see
-# app_gbemu.c's frame-timing log) - this is the CPU emulation side of closing
-# that gap, not the display draw side (already covered separately).
+# without touching the rest of the app's build - the emulation loop was sitting
+# over the Game Boy's own 16.7ms frame budget when this was added, and this is
+# the CPU emulation side of closing that gap, not the display draw side
+# (already covered separately).
 set_source_files_properties(app_gbemu.c PROPERTIES COMPILE_OPTIONS "-O3")

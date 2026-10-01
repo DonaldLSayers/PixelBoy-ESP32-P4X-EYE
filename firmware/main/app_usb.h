@@ -20,6 +20,10 @@
  */
 
 esp_err_t usb_msc_init(void);      /* call once at boot */
+/* Takes the USB device back down, for the deep-sleep path only - see the
+ * implementation. Nothing needs to undo it: a wake is a full reset, so the
+ * next boot installs it again. */
+void usb_msc_deinit(void);
 void usb_msc_tick(void);           /* call every frame - drives connect/disconnect detection */
 bool usb_msc_prompt_pending(void); /* a host just connected - show the yes/no prompt */
 bool usb_msc_active(void);         /* true while the real SD card is exposed to the host */
@@ -43,6 +47,9 @@ void usb_msc_exit(void);           /* force back to the camera app (e.g. Shutter
  * same as any inactive UVC device.
  *
  * Two picks at the same prompt (see app.c's handle_viewfinder_input()):
+ * CamMode-click starts Mirror, Mode-click starts GB Webcam. While either is
+ * running there is no screen to leave, so Menu-hold is the off switch (see
+ * usb_webcam_exit()).
  *   - Mirror: whatever's on the device's own 240x240 screen right now -
  *     viewfinder (any camera mode), the menu, the gallery, OSD prompts, all
  *     of it. Padded (not scaled) onto the fixed WEBCAM_FRAME_W/H canvas
@@ -63,9 +70,16 @@ void usb_msc_exit(void);           /* force back to the camera app (e.g. Shutter
 #define WEBCAM_FRAME_RATE 8
 #define WEBCAM_JPEG_MAX_BYTES (WEBCAM_FRAME_W * WEBCAM_FRAME_H) /* generous MJPEG upper bound - mostly-flat pixel-art/UI screen compresses well */
 
-void usb_webcam_accept(void);       /* start streaming over USB instead of handing off the SD card */
+/* Starts streaming over USB instead of handing off the SD card. False, having
+ * started nothing, if its JPEG buffer couldn't be allocated - see the
+ * implementation; the caller shows a failure message rather than a "MIRROR
+ * ON" over a stream that will never send anything. */
+bool usb_webcam_accept(void);
 bool usb_webcam_active(void);       /* true while webcam mode is running */
-void usb_webcam_exit(void);         /* stop streaming, back to the camera app */
+/* Stop streaming, back to the camera app. Reached from Menu-hold (see app.c's
+ * handle_*_input() - webcam mode has no screen of its own to exit from) and
+ * from usb_msc_tick() when the host disconnects. */
+void usb_webcam_exit(void);
 /* Feed one RGB888 frame at WEBCAM_FRAME_W x WEBCAM_FRAME_H - call every
  * app_step() while usb_webcam_active() (see usb_webcam_feed_screen()/
  * usb_webcam_feed_gb() in app.c). JPEG-encodes and hands it to the video

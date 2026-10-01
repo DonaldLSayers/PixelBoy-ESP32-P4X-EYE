@@ -33,6 +33,8 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
 #endif
 #include <string.h>
 
@@ -131,6 +133,58 @@ static uint8_t *s_grid_cache_rgb[GALLERY_GRID_CELLS];
 static int s_grid_cache_w[GALLERY_GRID_CELLS], s_grid_cache_h[GALLERY_GRID_CELLS];
 static int s_grid_cache_page = -1;
 
+/* ------------------------------------------------------- deep-sleep resume */
+
+/* What the device should come back to after a deep-sleep wake.
+
+ * A wake is a reset, so this file's own state machine is back at its cold-boot
+ * default - the live viewfinder - by the time the user is looking at the screen
+ * again, never whatever they were actually in the middle of. The camera modes
+ * need none of this (they are SCREEN_VIEWFINDER, and cam_mode plus the per-mode
+ * adjust target are already in the NVS settings blob), so what this covers is
+ * what would otherwise be lost: the menu's position, the photo being browsed,
+ * and - the one that matters most - a running GB ROM, which the emulator's own
+ * .state file can already restore frame-exactly but which nothing would ever
+ * relaunch.
+
+ * RTC_DATA_ATTR is what makes the lifetime right. It puts the record in the
+ * LP/RTC domain, the only thing still powered through deep sleep, so it survives
+ * a wake - and since the chip has no battery of its own it is lost on a real
+ * power-off, i.e. turning the device off starts it clean. (IDF re-loads this
+ * segment from the image on every other reset - panic, watchdog, esp_restart -
+ * so it cannot survive those either, which is what keeps the magic below an
+ * honest check.) */
+#define RESUME_MAGIC   0x52534D45u /* "RSME" */
+#define RESUME_VERSION 1u
+enum { RESUME_NONE = 0, RESUME_VIEWFINDER, RESUME_MENU, RESUME_GALLERY, RESUME_GBEMU };
+
+typedef struct {
+    uint32_t magic;       /* written last, checked first - a partial write is refused */
+    uint16_t version;
+    uint8_t kind;         /* RESUME_* */
+    uint8_t gallery_grid;
+    int32_t menu_sel;
+    int32_t gallery_pos;
+    int32_t gallery_view; /* gallery_view_t */
+    int32_t emu_slot;
+    char emu_rom[300];    /* deliberately rom_entry_t.path's own size (app_gbemu.c) */
+} resume_rec_t;
+
+static RTC_DATA_ATTR resume_rec_t s_resume;
+
+/* The emulator's half of that, in ordinary RAM: run_rom() is the only thing
+ * that knows its ROM and slot, app_enter_sleep() is what writes the record, and
+ * app_resume_note_gbemu() is how the two are introduced (see app.h). Cleared by
+ * the sleep that consumes it, so a later sleep from the camera app does not
+ * resume a ROM that has since been exited. */
+static bool s_resume_gbemu;
+static char s_resume_rom[300];
+static int s_resume_slot;
+/* Whether that session's .state actually made it to the card - reported on the
+ * sleep screen, since a sleep without it comes back to the ROM's title screen
+ * with nothing else to say why (see app_resume_note_gbemu()). */
+static bool s_resume_state_saved;
+
 /* ------------------------------------------------------------------- menu */
 
 typedef enum {
@@ -140,6 +194,8 @@ typedef enum {
     ROW_DC_AUTO,
     ROW_DC_EDGE,
     ROW_NORMAL_SIZE,
+    ROW_BACKLIGHT,
+    ROW_STANDBY,
     ROW_SLEEP,
     ROW_GALLERY, ROW_WIFI, ROW_EXIT
 } menu_row_t;
@@ -148,7 +204,14 @@ typedef enum {
  * ROW_SLEEP below, and app_step()'s idle check) - 0 = never. */
 static const int SLEEP_MINUTES[SLEEP_OPTIONS_COUNT] = {0, 1, 2, 3, 5, 10};
 
-static menu_row_t s_menu_rows[11]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 4 shared rows */
+/* LCD backlight duty (%) choices - see BACKLIGHT_OPTIONS_COUNT in
+ * app_settings.h and ROW_BACKLIGHT below. Deliberately tops out at 100%, the
+ * fixed level this always ran at before the setting existed, and 25% is the
+ * lowest step that still reads easily outdoors-ish rather than a token "dim"
+ * that's useless in daylight. */
+static const int BACKLIGHT_PERCENT[BACKLIGHT_OPTIONS_COUNT] = {25, 50, 75, 100};
+
+static menu_row_t s_menu_rows[13]; /* GB Camera's 7 mode rows (adding ROW_GB_AEB) + 6 shared rows */
 static int s_menu_count;
 static int s_menu_sel;
 
@@ -562,7 +625,10 @@ static esp_err_t grab_process_draw(float shutter_curtain, int64_t *out_t_grabbed
         vf_scale_t vf_scale = (s_set.vf_scale == VF_SCALE_CROP2X && frame_preview_active)
                                    ? VF_SCALE_NATIVE1X
                                    : (vf_scale_t)s_set.vf_scale;
-        bool show_frame = vf_scale != VF_SCALE_CROP2X && s_set.frame != 0;
+        /* frame_available(): an SD frame selected in a previous session has no
+         * pixel data to draw until the card's list has loaded (app_frames.h) -
+         * until then this draws the plain viewfinder, then the frame appears. */
+        bool show_frame = vf_scale != VF_SCALE_CROP2X && frame_available(s_set.frame);
         int framed_w = 0, framed_h = 0;
         if (show_frame) {
             const frame_meta_t *fm = frames_get(s_set.frame - 1);
@@ -871,7 +937,10 @@ static void take_photo(void)
             n = storage_ready() ? storage_save_dc(s_rgb_mode_rgb, GBCAM_W, GBCAM_H, false, "DC") : -1;
         }
     } else if (s_set.cam_mode == CAM_MODE_GB) {
-        int frame = s_set.frame == 0 ? -1 : (int)s_set.frame - 1;
+        /* A photo taken in the second or so the card's frame list is still
+         * loading is saved without its border rather than not at all - the
+         * frame it would have had isn't decoded yet to bake in (app_frames.h). */
+        int frame = frame_available(s_set.frame) ? (int)s_set.frame - 1 : -1;
         if (aeb_shot) {
             n = gb_aeb_capture() > 0 ? 0 : -1;
         } else {
@@ -913,24 +982,72 @@ static void take_photo(void)
     if (n < 0) osd_text("SAVE FAILED", NULL);
 }
 
-static void enter_sleep(void)
+void app_enter_sleep(void)
 {
+    /* The resume record, written here rather than at either call site: this is
+     * the only way into deep sleep, so a third caller cannot forget to record
+     * one (see s_resume). */
+    memset(&s_resume, 0, sizeof s_resume);
+    s_resume.version = RESUME_VERSION;
+    if (s_resume_gbemu) {
+        s_resume.kind = RESUME_GBEMU;
+        s_resume.emu_slot = s_resume_slot;
+        snprintf(s_resume.emu_rom, sizeof s_resume.emu_rom, "%s", s_resume_rom);
+        s_resume_gbemu = false;
+    } else if (s_screen == SCREEN_MENU) {
+        s_resume.kind = RESUME_MENU;
+        s_resume.menu_sel = s_menu_sel;
+    } else if (s_screen == SCREEN_GALLERY) {
+        s_resume.kind = RESUME_GALLERY;
+        s_resume.gallery_pos = s_gallery_pos;
+        s_resume.gallery_grid = s_gallery_grid ? 1 : 0;
+        s_resume.gallery_view = (int)s_gallery_view;
+    } else {
+        /* Viewfinder - and USB/WiFi, which app_sleep_due() refuses to sleep
+         * from at all, so they are unreachable here. */
+        s_resume.kind = RESUME_VIEWFINDER;
+    }
+    s_resume.magic = RESUME_MAGIC; /* last: a torn record is one that is not resumed */
+
+    /* Standby almost always got here first (the SLEEP timeouts are minutes
+     * against standby's tens of seconds), which means the backlight is
+     * already at 0 and the message below would be drawn onto a panel nobody
+     * can see - making a device that slept successfully indistinguishable
+     * from one that is merely standing by. Bring it up for the 400ms the
+     * message is held; app_backlight_percent(0) is the user's own setting,
+     * not a fixed level. */
+    display_set_backlight(app_backlight_percent());
+    ESP_LOGI(TAG, "deep sleep"); /* last line before the reset - a wake is a fresh boot */
     display_begin_blank(0, 0, 0);
     display_text(DISP_W / 2 - display_text_width("SLEEPING", 3) / 2, 100, 3, "SLEEPING", 255, 255, 255);
+    /* Only for an emulator session, where there is a question to answer: the
+     * game comes back on the frame it was left on, or it comes back on its
+     * title screen. The card is powered down right after this, so this screen
+     * is the only chance to see which. */
+    if (s_resume.kind == RESUME_GBEMU) {
+        const char *msg = s_resume_state_saved ? "GAME SAVED" : "GAME NOT SAVED";
+        uint8_t r = s_resume_state_saved ? 160 : 255, g = s_resume_state_saved ? 160 : 80;
+        display_text(DISP_W / 2 - display_text_width(msg, 1) / 2, 140, 1, msg, r, g, s_resume_state_saved ? 160 : 80);
+    }
     display_end_frame();
     plat_sleep_ms(400); /* let it actually show before the screen cuts out */
     plat_enter_deep_sleep(); /* cuts camera/LCD/SD power; wakes (as a fresh boot) on Shutter - never returns */
 }
 
-static void enter_gallery(void)
+/* True if the gallery actually opened. The false cases leave the caller's
+ * screen untouched on purpose: the camera is paused for the whole time the
+ * menu or the gallery is up, so a caller that had already switched to
+ * SCREEN_VIEWFINDER would land on a black viewfinder it can't come back from
+ * (nothing resumes the camera there) - see the ROW_GALLERY case. */
+static bool enter_gallery(void)
 {
     if (!storage_ready()) {
         osd_text("NO SD CARD", NULL);
-        return;
+        return false;
     }
     if (storage_count() == 0) {
         osd_text("NO PHOTOS", NULL);
-        return;
+        return false;
     }
     camera_pause();  /* nothing live to show browsing photos - see app_camera.h */
     s_screen = SCREEN_GALLERY;
@@ -940,6 +1057,7 @@ static void enter_gallery(void)
     s_gallery_view = GALLERY_VIEW_CROP2X;
     s_gallery_dirty = true;
     s_delete_armed_until_us = 0;
+    return true;
 }
 
 static void leave_gallery(void)
@@ -1018,6 +1136,177 @@ static void truncate_value(char *out, const char *in)
     snprintf(out, 12, "%s", in);
 }
 
+/* --------------------------------------------------------------- backlight */
+
+/* There used to be an auto-dim tier here - 20s of idle pulled the backlight
+ * to 15% before standby took it out entirely. Removed: a dimmed screen is
+ * still a screen the user is looking at, so it bought almost no power while
+ * making every press during that window ambiguous - was it meant for the game
+ * or just to bring the light back? Losing it means the screen is either at the
+ * user's own level or off, and "off" is the only state that has to intercept a
+ * press (see the swallow in app_step()/run_rom()). Standby arrives sooner for
+ * it - see STANDBY_SECONDS below. */
+
+/* Auto-standby timeout choices - see STANDBY_OPTIONS_COUNT in app_settings.h
+ * and ROW_STANDBY below - 0 = never. Not deep sleep: standby is the cheap,
+ * instantly-reversible tier (screen out, camera stopped, straight back on the
+ * next press), so having it user-tunable is reasonable in a way the one-way
+ * ROW_SLEEP trip isn't. It does mean the pair can be set in either order; the
+ * only consequence of a sleep timeout shorter than this one is that the
+ * standby state is never reached, which costs nothing. */
+static const int STANDBY_SECONDS[STANDBY_OPTIONS_COUNT] = {0, 15, 30, 60, 120, 300};
+/* The same values again for the menu to print (see ROW_STANDBY in draw_menu())
+ * - spelled out rather than formatted from STANDBY_SECONDS[] so the row reads
+ * "1 MIN" and not "60 SEC"; keep the two in step. */
+static const char *const STANDBY_LABELS[STANDBY_OPTIONS_COUNT] = {"NEVER", "15 SEC", "30 SEC", "1 MIN", "2 MIN", "5 MIN"};
+
+/* Defined with the rest of the standby state below - update_backlight() only
+ * needs to know whether the screen is meant to be out at all. */
+static bool s_standby;
+
+/* Set when a press is spent waking the screen rather than doing what it says
+ * (see the drain in app_step()), and kept set until that same touch is over.
+ * A press is not one event: releasing it posts a click, and holding it posts a
+ * long-press, both hundreds of ms after the backlight is already back on - so
+ * without this the press would wake the device and its own tail would then
+ * open the menu, take a photo or exit a ROM. Same flag, same reason, in
+ * app_gbemu.c's run_rom(). */
+static bool s_swallow_press;
+
+/* The same idea as the flag above, for the other kind of touch that was not
+ * aimed at the app: the one that woke the device. A wake is a reset, so the
+ * finger that pressed Shutter can still be on the button when input_init()
+ * starts polling - and by the time a resumed screen is up, that press (and the
+ * click ending it) is a photo, or an A press in a resumed ROM.
+
+ * s_swallow_press cannot cover this: it is only armed by seeing an event, and it
+ * clears the moment nothing is held, which is true on the very first app_step()
+ * because the 20ms poll has not confirmed the held pin yet. This one is armed at
+ * boot and expires on its own terms - see app_boot_swallow_poll(). */
+static bool s_boot_swallow;
+static int64_t s_boot_swallow_deadline_us;
+/* Long enough to cover the two-sample debounce (~40ms) and a couple of poll
+ * margins, short enough that the earliest plausible genuine press after a wake
+ * is not eaten. Only reached when nothing at all was sampled - a button that is
+ * actually down keeps the window open until it comes back up. */
+#define BOOT_SWALLOW_MS 250
+
+/* "Never" as far as the two functions below are concerned: a sentinel rather
+ * than 0 because 0 is itself a meaningful entry in STANDBY_SECONDS[] (never),
+ * not "unset". */
+static int64_t standby_us(void)
+{
+    int sec = STANDBY_SECONDS[s_set.standby];
+    return sec == 0 ? 0 : (int64_t)sec * 1000000LL;
+}
+
+/* The user's own level, shared with app_gbemu.c (see app.h). Never returns 0;
+ * full-off belongs to whichever loop is doing the standby (app_step() also
+ * stops the camera, the emulator doesn't).
+ *
+ * Takes no idle argument any more - the auto-dim that used it is gone (see the backlight
+ * section above), so this is the setting and nothing else. Both loops still come through
+ * here rather than reading BACKLIGHT_PERCENT[] directly because that table is private to
+ * this file. */
+int app_backlight_percent(void) { return BACKLIGHT_PERCENT[s_set.backlight]; }
+
+/* The timeout half of that policy, shared with app_gbemu.c (see app.h). The
+ * standby state itself is each loop's own business - what app_step() does
+ * about it (stop the camera) is not what the emulator does (leave it alone). */
+bool app_standby_due(int64_t idle_us)
+{
+    int64_t sb = standby_us();
+    return sb != 0 && idle_us > sb;
+}
+
+/* The SLEEP timer (ROW_SLEEP), which deep-sleeps rather than just darkening.
+ * sleep_min of 0 means "never" (see the row), not an instant sleep.
+ *
+ * The exemptions are the whole reason this lives here instead of in each
+ * loop: nothing should cut power while a PC owns the SD card (mid-transfer),
+ * while the WiFi gallery could be mid-download, or while mirror mode is
+ * streaming the very screen that would go blank - and the emulator loop has
+ * no way to know about any of those on its own (it never calls
+ * usb_msc_tick(), so it wouldn't even notice the cable). */
+bool app_sleep_due(int64_t idle_us)
+{
+    int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
+    return sleep_min != 0 && s_screen != SCREEN_USB && s_screen != SCREEN_WIFI && !usb_webcam_active() &&
+           idle_us > (int64_t)sleep_min * 60 * 1000000LL;
+}
+
+/* Idempotent and cheap to call every app_step(): display_hw_set_backlight()
+ * ignores a value it's already at, so a lit viewfinder doesn't retouch the
+ * LEDC duty (or its INFO log) 15 times a second. */
+static void update_backlight(void)
+{
+    display_set_backlight(s_standby ? 0 : app_backlight_percent());
+}
+
+/* ---------------------------------------------------------------- standby */
+
+/* The one idle step: the backlight goes out
+ * completely and, in the viewfinder, the camera stops streaming. Those are
+ * the two biggest continuous loads on the board - the sensor/MIPI/ISP chain
+ * especially, which runs at its own 25fps regardless of how few frames this
+ * app actually consumes - and both are pure waste when nobody has touched the
+ * thing for half a minute.
+ *
+ * Deliberately not deep sleep: that's a full reset on wake (see
+ * plat_enter_deep_sleep()), so anything reached from here has to come back
+ * without a reboot. camera_pause()/camera_resume() are exactly that - a
+ * V4L2 STREAMOFF/STREAMON of buffers the driver already owns - so the cost of
+ * waking is the ISP's own restart plus whatever the auto-exposure does
+ * converging again, not a boot. It's also why this is a separate, much
+ * earlier threshold than ROW_SLEEP's: it's meant to be entered and left
+ * constantly, not to be a one-way trip.
+ *
+ * The timeout itself is the user's (ROW_STANDBY, see app_standby_due()) and
+ * defaults to 30s - comfortably inside the shortest ROW_SLEEP timeout (1 min),
+ * so the two are ordered by default rather than racing. */
+#define STANDBY_POLL_MS 20
+
+/* Whether *this* stopped the camera, as opposed to finding it already stopped
+ * by a screen that manages it itself (enter_menu()/enter_gallery()). Only a
+ * pause we made is ours to undo - without this, leaving standby from the
+ * gallery would camera_resume() behind enter_gallery()'s back. */
+static bool s_standby_paused_camera;
+
+/* Screens that are being watched from somewhere other than this device:
+ * handing the SD card to a PC (the host is driving that screen), the WiFi
+ * gallery (a phone may be mid-download), and USB mirror mode (a host is
+ * capturing the screen - blanking it would blank the stream). Same set
+ * app_step()'s auto-sleep check excludes, for the same reasons. */
+static bool standby_allowed(void)
+{
+    if (usb_webcam_active()) return false;
+    return s_screen != SCREEN_USB && s_screen != SCREEN_WIFI;
+}
+
+/* Time-based only - a pending input event has already been folded into
+ * s_last_input_us by the time app_step() calls this (see there), which is
+ * what makes leaving standby happen before the event that caused it gets
+ * dispatched. */
+static void update_standby(void)
+{
+    bool want = app_standby_due(now_us() - s_last_input_us) && standby_allowed();
+    if (want == s_standby) return;
+
+    if (want) {
+        if (s_screen == SCREEN_VIEWFINDER) {
+            camera_pause();
+            s_standby_paused_camera = true;
+        }
+        s_standby = true;
+    } else {
+        if (s_standby_paused_camera) {
+            camera_resume();
+            s_standby_paused_camera = false;
+        }
+        s_standby = false;
+    }
+}
+
 static void build_menu(void)
 {
     s_menu_count = 0;
@@ -1039,6 +1328,8 @@ static void build_menu(void)
     } else { /* CAM_MODE_NORMAL */
         s_menu_rows[s_menu_count++] = ROW_NORMAL_SIZE;
     }
+    s_menu_rows[s_menu_count++] = ROW_BACKLIGHT;
+    s_menu_rows[s_menu_count++] = ROW_STANDBY;
     s_menu_rows[s_menu_count++] = ROW_SLEEP;
     s_menu_rows[s_menu_count++] = ROW_GALLERY;
     s_menu_rows[s_menu_count++] = ROW_WIFI;
@@ -1058,11 +1349,12 @@ static void draw_menu(void)
 {
     static const char *const dc_amount_labels[] = {"0%", "25%", "50%", "75%", "100%"};
 
-    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 4 shared rows
-     * (Sleep/Gallery/WiFi/Exit) = 11, the largest any mode builds. */
-    char labels[11][13], values[11][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
-    const char *label_ptrs[11], *value_ptrs[11];
-    icon_id_t icons[11];
+    /* Sized to match s_menu_rows[] - GB Camera's 7 mode rows + 6 shared rows
+     * (Backlight/Standby/Sleep/Gallery/WiFi/Exit) = 13, the largest any mode
+     * builds. */
+    char labels[13][13], values[13][12]; /* labels: 13, fits "WIFI GALLERY" (12 chars) + null */
+    const char *label_ptrs[13], *value_ptrs[13];
+    icon_id_t icons[13];
     for (int i = 0; i < s_menu_count; i++) {
         const char *val = NULL;
         switch (s_menu_rows[i]) {
@@ -1108,13 +1400,11 @@ static void draw_menu(void)
             icons[i] = ICON_AUTO;
             break;
         case ROW_GB_AEB:
-            /* No dedicated icon - reusing AUTO's (both are exposure-related)
-             * rather than adding a new asset for this still-early feature. */
             snprintf(labels[i], sizeof labels[i], "AEB/HDR");
             if (s_set.gb_aeb == 0) snprintf(values[i], sizeof values[i], "OFF");
             else snprintf(values[i], sizeof values[i], "%d SHOTS", s_set.gb_aeb * 2 + 1);
             val = values[i];
-            icons[i] = ICON_AUTO;
+            icons[i] = ICON_HDR;
             break;
         case ROW_DC_PALETTE:
             snprintf(labels[i], sizeof labels[i], "PALETTE");
@@ -1161,6 +1451,27 @@ static void draw_menu(void)
             truncate_value(values[i], normal_size_name(s_set.normal_size));
             val = values[i];
             icons[i] = ICON_SIZE;
+            break;
+        case ROW_BACKLIGHT:
+            /* "BACKLIGHT", not "BRIGHTNESS" - that name is already taken by the
+             * viewfinder's own quick-adjust (the GB Camera's emulated exposure,
+             * a pixel-level effect), and the two are easy to confuse. The icon
+             * asset is brightness.png all the same (see tools/gen_icons.py). */
+            snprintf(labels[i], sizeof labels[i], "BACKLIGHT");
+            snprintf(values[i], sizeof values[i], "%d%%", BACKLIGHT_PERCENT[s_set.backlight]);
+            val = values[i];
+            icons[i] = ICON_BACKLIGHT;
+            break;
+        case ROW_STANDBY:
+            /* "STANDBY" rather than "SCREEN OFF": this also stops the camera,
+             * not just the panel, and it's the word the code and the comments
+             * here already use. The value column carries the seconds, which is
+             * what actually distinguishes it from SLEEP below - the two rows
+             * sit together so they read as the two halves of one policy. */
+            snprintf(labels[i], sizeof labels[i], "STANDBY");
+            snprintf(values[i], sizeof values[i], "%s", STANDBY_LABELS[s_set.standby]);
+            val = values[i];
+            icons[i] = ICON_STANDBY;
             break;
         case ROW_SLEEP:
             snprintf(labels[i], sizeof labels[i], "SLEEP");
@@ -1265,14 +1576,35 @@ static void activate_menu_row(void)
         s_set.normal_size = (uint8_t)((s_set.normal_size + 1) % NORMAL_SIZE_COUNT);
         settings_changed(&s_set);
         break;
+    case ROW_BACKLIGHT:
+        s_set.backlight = (uint8_t)((s_set.backlight + 1) % BACKLIGHT_OPTIONS_COUNT);
+        settings_changed(&s_set);
+        /* Not just saved - applied now, so the new level is visible in the
+         * menu the moment it's picked. update_backlight() won't undo it: the
+         * Shutter press that got here already refreshed s_last_input_us, so
+         * the idle window is nowhere near elapsed. */
+        update_backlight();
+        break;
+    case ROW_STANDBY:
+        s_set.standby = (uint8_t)((s_set.standby + 1) % STANDBY_OPTIONS_COUNT);
+        settings_changed(&s_set);
+        /* Same as ROW_BACKLIGHT: the Shutter press that got here just refreshed
+         * s_last_input_us, so a shorter timeout can't fire out from under the
+         * menu the moment it's picked. */
+        update_standby();
+        update_backlight();
+        break;
     case ROW_SLEEP:
         s_set.sleep_min = (uint8_t)((s_set.sleep_min + 1) % SLEEP_OPTIONS_COUNT);
         settings_changed(&s_set);
         break;
     case ROW_GALLERY:
-        s_screen = SCREEN_VIEWFINDER; /* enter_gallery() switches it again if it succeeds */
-        enter_gallery();
-        return;
+        /* Stay on the menu (camera still paused, message up) if it can't open -
+         * the old "assume success and set the screen first" version left the
+         * device on SCREEN_VIEWFINDER with the camera paused and nothing that
+         * would ever resume it. */
+        if (enter_gallery()) return;
+        break;
     case ROW_WIFI:
         /* camera_pause() already happened entering the menu - stays paused
          * behind this screen, same as ROW_GALLERY, until handle_wifi_input()
@@ -1293,8 +1625,29 @@ static void activate_menu_row(void)
     }
 }
 
+/* Webcam mode (mirror or GB) has no screen of its own, so its off switch rides
+ * on Menu's long press, which is otherwise unused on every screen it can be
+ * running behind. Menu-hold from the viewfinder would normally open the gallery
+ * and in the gallery would normally re-select a photo - while a stream is live
+ * it stops the stream instead (the gallery is still one menu row away).
+ *
+ * Not optional: without it the only ways out are the host releasing the
+ * device or a replug, and usb_msc_tick()'s tud_mounted() check can't see a
+ * bare cable pull (see there) - so a webcam session could sit there
+ * streaming to a PC that isn't even connected, which is also what keeps
+ * app_sleep_due()/standby_allowed() refusing to idle. Returns true if the
+ * press was the exit gesture, so the caller doesn't also act on it. */
+static bool webcam_exit_long_press(const input_event_t *ev)
+{
+    if (ev->type != INPUT_LONG_PRESS || ev->button != BTN_MENU || !usb_webcam_active()) return false;
+    usb_webcam_exit();
+    osd_brief("WEBCAM OFF");
+    return true;
+}
+
 static void handle_menu_input(const input_event_t *ev)
 {
+    if (webcam_exit_long_press(ev)) return;
     if (ev->type == INPUT_ROTATE) {
         int v = s_menu_sel + ev->value;
         s_menu_sel = v < 0 ? 0 : v > s_menu_count - 1 ? s_menu_count - 1 : v;
@@ -1336,6 +1689,12 @@ static void cycle_cam_mode(void)
          * still worth keeping in case anything inside ever does pause it. */
         gbemu_run();
         camera_resume();
+        /* A whole session just went by with s_last_input_us frozen (app_step()
+         * only refreshes it when input is pending, and none is dispatched in
+         * here), so without this the sleep check would see the entire session as
+         * idle and deep-sleep on the very next iteration - exiting a ROM looking
+         * like the device switching itself off. */
+        s_last_input_us = now_us();
         s_set.cam_mode = CAM_MODE_GB;
     }
     s_adjust = load_adjust(s_set.cam_mode);
@@ -1437,6 +1796,8 @@ static void rotate_viewfinder(int detents)
 
 static void handle_viewfinder_input(const input_event_t *ev)
 {
+    if (webcam_exit_long_press(ev)) return;
+
     if (usb_msc_prompt_pending()) {
         /* Steals input while the prompt is up, same as a normal button click
          * still would - a photo shouldn't fire underneath it. */
@@ -1454,13 +1815,13 @@ static void handle_viewfinder_input(const input_event_t *ev)
              * the menu, the gallery...) to USB alongside normal use. See
              * usb_webcam_feed_screen() and app_usb.h's comment. */
             s_webcam_mirror = true;
-            usb_webcam_accept();
-            osd_brief("MIRROR ON");
+            if (usb_webcam_accept()) osd_brief("MIRROR ON");
+            else osd_text("WEBCAM FAILED", NULL); /* no PSRAM for the JPEG buffer - see app_usb.c */
         } else if (ev->type == INPUT_CLICK && ev->button == BTN_MODE) {
             /* GB Webcam: just the photo (+ frame, if on), see usb_webcam_feed_gb(). */
             s_webcam_mirror = false;
-            usb_webcam_accept();
-            osd_brief("GB WEBCAM ON");
+            if (usb_webcam_accept()) osd_brief("GB WEBCAM ON");
+            else osd_text("WEBCAM FAILED", NULL);
         } else if (ev->type == INPUT_CLICK && ev->button == BTN_SHUTTER) {
             usb_msc_decline();
         }
@@ -1507,6 +1868,7 @@ static void handle_viewfinder_input(const input_event_t *ev)
 
 static void handle_gallery_input(const input_event_t *ev)
 {
+    if (webcam_exit_long_press(ev)) return;
     if (ev->type == INPUT_ROTATE) {
         int pos = s_gallery_pos + ev->value;
         int max = storage_count() - 1;
@@ -1588,23 +1950,32 @@ static void log_stats(void)
 }
 
 /* Edge-triggered so it warns once per drop below the threshold, not every
- * frame - and can warn again on a later drop (e.g. it recovered because the
- * board got plugged in to charge, then was unplugged and ran back down). */
+ * call - and can warn again on a later drop (e.g. it recovered because the
+ * board got plugged in to charge, then was unplugged and ran back down).
+ *
+ * The edge itself lives here rather than in the two places that show it
+ * because both loops need the same answer: app_step() below, and the
+ * emulator's own loop, which never reaches app_step() at all (see
+ * app_gbemu.c's run_rom()) and is where the battery drains fastest. */
 #define LOW_BATTERY_PCT 15
 static bool s_low_battery_warned;
 
-static void check_low_battery(void)
+bool app_low_battery_edge(void)
 {
     int pct = plat_battery_percent();
-    if (pct < 0) return; /* no gauge to read - nothing to warn about */
-    if (pct <= LOW_BATTERY_PCT) {
-        if (!s_low_battery_warned) {
-            s_low_battery_warned = true;
-            osd_text("LOW BATTERY", NULL);
-        }
-    } else {
+    if (pct < 0) return false; /* no gauge to read - nothing to warn about */
+    if (pct > LOW_BATTERY_PCT) {
         s_low_battery_warned = false;
+        return false;
     }
+    if (s_low_battery_warned) return false;
+    s_low_battery_warned = true;
+    return true;
+}
+
+static void check_low_battery(void)
+{
+    if (app_low_battery_edge()) osd_text("LOW BATTERY", NULL);
 }
 
 static void viewfinder_frame(void)
@@ -1615,7 +1986,6 @@ static void viewfinder_frame(void)
         s_stats.skipped++;
         return;
     }
-    check_low_battery();
     s_next_frame_us = (s_next_frame_us && t0 - s_next_frame_us < FRAME_INTERVAL_US)
                           ? s_next_frame_us + FRAME_INTERVAL_US : t0 + FRAME_INTERVAL_US;
 
@@ -1717,7 +2087,29 @@ static void extract_plain_photo(const uint8_t *rgb, int w, int h)
  * picking one sample per GB_PNG_SCALE x GB_PNG_SCALE block (already solid
  * colour, from the original nearest-neighbour upscale) into s_frame_rgb,
  * reused here since its size (the biggest canvas, Wild frames) covers every
- * case. w/h out are the resulting native size. */
+ * case. w/h out are the resulting native size.
+ *
+ * Only valid for one of the three sizes storage_save() writes - see
+ * saved_png_size_known(), which the caller checks first. Anything else here
+ * writes past the end of s_frame_rgb by construction. */
+
+/* The three sizes a saved GB photo can be: the unframed 128x112 canvas, or a
+ * framed one at *the frame canvas' 160 width, 144 or 224 tall (frames.h's two
+ * supported heights), all at GB_PNG_SCALE. Both downscale_to_native() and
+ * extract_plain_photo() index a photo with fixed offsets sized for exactly
+ * these, so a .PNG that is none of them - a hand-made file dropped into
+ * /GBCAM over the USB MSC drive it's presented as, or a corrupt one - has to
+ * be shown whole instead of through either. Both of those read from a buffer
+ * the decoder sized from the file's own dimensions, so an unrecognised size is
+ * not a read bug; it's the fixed-size s_frame_rgb/s_gallery_plain_rgb writes
+ * and the fixed crop offsets that don't hold. */
+static bool saved_png_size_known(int w, int h)
+{
+    if (w == GBCAM_W * GB_PNG_SCALE && h == GBCAM_H * GB_PNG_SCALE) return true;
+    if (w == 160 * GB_PNG_SCALE && (h == 144 * GB_PNG_SCALE || h == 224 * GB_PNG_SCALE)) return true;
+    return false;
+}
+
 static void downscale_to_native(const uint8_t *rgb, int w, int h, int *out_w, int *out_h)
 {
     int nw = w / GB_PNG_SCALE, nh = h / GB_PNG_SCALE;
@@ -1816,7 +2208,14 @@ static void gallery_frame(void)
         uint8_t *rgb;
         int w, h;
         if (storage_load_gb_png(number, &rgb, &w, &h) == ESP_OK) {
-            if (s_gallery_view == GALLERY_VIEW_FIT) {
+            if (!saved_png_size_known(w, h)) {
+                /* Not a photo this firmware wrote - show it whole (the one
+                 * generic path) rather than through the fixed offsets below,
+                 * and say so: this is a file on a card that is also a USB
+                 * drive, so it's something the user can act on. */
+                PLOGW(TAG, "photo #%d is %dx%d, not a saved photo size - showing it scaled to fit", number, w, h);
+                display_begin_camera(rgb, w, h, true);
+            } else if (s_gallery_view == GALLERY_VIEW_FIT) {
                 display_begin_camera(rgb, w, h, true);
             } else if (s_gallery_view == GALLERY_VIEW_NATIVE1X) {
                 int nw, nh;
@@ -1844,21 +2243,210 @@ static void gallery_frame(void)
     plat_sleep_ms(20);
 }
 
-/* frames_sd_init()'s progress callback - shown while it's converting a new
- * ROM/pack (the first time only; every boot after that just loads the
- * cached .png, see app_frames_sd.h). */
-static void frames_boot_progress(const char *l1, const char *l2)
+/* frames_sd_start()'s background scan, two things it can't do for itself: it
+ * runs on its own task, so the display stays the main task's to draw (the scan
+ * publishes text, this shows it as an OSD instead of letting another task
+ * touch the panel mid-frame); and the frame list only exists once it
+ * finishes, so the saved frame index can't be checked against it until then.
+ * Both are no-ops once the scan is done. */
+static void frames_boot_status(void)
 {
-    display_begin_blank(0, 0, 0);
-    display_text(DISP_W / 2 - display_text_width(l1, 2) / 2, 100, 2, l1, 255, 255, 255);
-    if (l2) display_text(DISP_W / 2 - display_text_width(l2, 1) / 2, 130, 1, l2, 200, 200, 200);
-    display_end_frame();
+    char l1[40], l2[40];
+    if (frames_sd_status(l1, sizeof l1, l2, sizeof l2)) osd_text(l1, l2[0] ? l2 : NULL);
+}
+
+/* SD content may have changed since s_set.frame was saved, so the saved index
+ * is checked against the finished list - but only once that list exists.
+ * Doing it at boot, the way this used to work, would throw away a perfectly
+ * good SD frame choice and fall back to no frame at all, because the list it
+ * would be checked against is still loading. */
+static void frames_settle(void)
+{
+    static bool settled;
+    if (settled || !frames_sd_ready()) return;
+    settled = true;
+    if (!frame_available(s_set.frame)) {
+        s_set.frame = 0;
+        settings_changed(&s_set);
+    }
+}
+
+/* ------------------------------------------------------------- boot timing */
+
+/* The only way to tell where a slow boot actually goes: there is no board-side
+ * profiler here, and the interesting part is spread across NVS, the SD card and
+ * the camera ISP. esp_timer_get_time() starts counting in the second-stage
+ * loader, so these are milliseconds since the chip came out of reset, bootloader
+ * work included - not "time spent in app_init()". Stamped at the milestones in
+ * app_init() below and printed once, before the resume there can block for a
+ * whole session. */
+#define BOOT_STAGES 9
+static const char *const BOOT_STAGE_NAMES[BOOT_STAGES] = {"reset", "nvs",    "display", "input", "sd",
+                                                          "frames", "palettes", "usb",  "camera"};
+static int64_t s_boot_ms[BOOT_STAGES];
+static int s_boot_stage;
+
+static void boot_stamp(void)
+{
+    if (s_boot_stage < BOOT_STAGES) s_boot_ms[s_boot_stage++] = now_us() / 1000;
+}
+
+static void boot_log(void)
+{
+    char buf[160];
+    int n = 0;
+    for (int i = 1; i < s_boot_stage && n < (int)sizeof buf - 24; i++)
+        n += snprintf(buf + n, sizeof buf - (size_t)n, " %s=%lld", BOOT_STAGE_NAMES[i],
+                      (long long)(s_boot_ms[i] - s_boot_ms[i - 1]));
+    PLOGI(TAG, "boot: %lldms total -%s", (long long)s_boot_ms[s_boot_stage - 1], buf);
+}
+
+/* ------------------------------------------------------- the waking touch */
+
+static void app_boot_swallow_arm(void)
+{
+    s_boot_swallow = true;
+    s_boot_swallow_deadline_us = now_us() + BOOT_SWALLOW_MS * 1000;
+}
+
+bool app_boot_swallow_poll(void)
+{
+    if (!s_boot_swallow) return false;
+    /* Two conditions for the two halves of the same problem: the deadline covers
+     * a finger already released before input_init() ran (nothing was ever
+     * queued, so there is nothing left to swallow), and the held/queued test
+     * covers one still down - which stays swallowed until the whole touch is
+     * over, the same rule s_swallow_press follows and for the same reason (the
+     * click that ends the press is queued by the poll that clears the state). */
+    if (now_us() < s_boot_swallow_deadline_us) return true;
+    if (input_any_held() || input_pending()) return true;
+    s_boot_swallow = false;
+    return false;
+}
+
+/* -------------------------------------------------------------- waking up */
+
+void app_resume_note_gbemu(const char *rom_path, int slot, bool state_saved)
+{
+    s_resume_gbemu = true;
+    s_resume_state_saved = state_saved;
+    snprintf(s_resume_rom, sizeof s_resume_rom, "%s", rom_path ? rom_path : "");
+    s_resume_slot = slot;
+}
+
+/* The wake side of the resume record. Called once, near the end of app_init(),
+ * where display/input/storage/camera are all up - and deliberately before the
+ * idle clock is stamped, because the emulator case blocks right here for as long
+ * as the session lasts.
+ *
+ * Every way this can fail ends on the plain viewfinder, which is what a cold
+ * boot shows anyway: no SD card, ROM deleted, gallery emptied, a record from
+ * another build. Nothing here is worth refusing to boot over. */
+static void resume_apply(void)
+{
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO || s_resume.magic != RESUME_MAGIC ||
+        s_resume.version != RESUME_VERSION) {
+        /* Cold boot (the record is all zeros), a stale one, or a wake that
+         * recorded nothing. Dropped either way - app_enter_sleep() writes a fresh
+         * one every time it runs. */
+        memset(&s_resume, 0, sizeof s_resume);
+        return;
+    }
+
+    resume_rec_t r = s_resume;
+    memset(&s_resume, 0, sizeof s_resume); /* one-shot: the next wake starts clean */
+    PLOGI(TAG, "resuming, kind %d", (int)r.kind);
+
+    switch (r.kind) {
+    case RESUME_MENU:
+        /* enter_menu()'s own body minus its s_menu_sel = 0: the position is the
+         * whole point of restoring this screen. */
+        camera_pause();
+        build_menu();
+        s_menu_sel = r.menu_sel < 0 ? 0 : r.menu_sel >= s_menu_count ? s_menu_count - 1 : (int)r.menu_sel;
+        s_screen = SCREEN_MENU;
+        break;
+
+    case RESUME_GALLERY:
+        /* enter_gallery()'s checks, but not its defaults: the photo list is
+         * whatever the card holds now, so an index that no longer exists clamps
+         * rather than being taken on trust. */
+        if (!storage_ready()) break; /* "NO SD CARD" is already on screen - see app_init() */
+        if (storage_count() == 0) {
+            osd_text("NO PHOTOS", NULL);
+            break;
+        }
+        camera_pause();
+        s_gallery_pos = r.gallery_pos < 0 ? 0
+                        : r.gallery_pos >= storage_count() ? storage_count() - 1
+                                                           : (int)r.gallery_pos;
+        s_gallery_grid = r.gallery_grid != 0;
+        s_gallery_view = (r.gallery_view >= 0 && r.gallery_view < GALLERY_VIEW_COUNT)
+                             ? (gallery_view_t)r.gallery_view
+                             : GALLERY_VIEW_CROP2X;
+        s_grid_cache_page = -1; /* force a fresh decode - see gallery_grid_frame() */
+        s_gallery_dirty = true;
+        s_delete_armed_until_us = 0;
+        s_screen = SCREEN_GALLERY;
+        break;
+
+    case RESUME_GBEMU:
+        /* Deliberately no camera_pause() first: a GB Camera ROM's viewfinder
+         * needs the ISP actually streaming, the same reason cycle_cam_mode() does
+         * not pause either. The epilogue afterwards is that same function's,
+         * which this path would otherwise never reach - the device sleeps *inside*
+         * gbemu_run(), so the cam_mode = CAM_MODE_GB reset after it never runs
+         * and the in-RAM copy is still CAM_MODE_EMULATOR. (NVS never sees that
+         * value: settings_changed() is only called once gbemu_run() has
+         * returned.) */
+        if (gbemu_run_rom(r.emu_rom, r.emu_slot)) {
+            /* Ending that session lands on the ROM list, exactly like ending any
+             * other one - the resumed session was an ordinary session from the
+             * moment it started, and its exit should not be the one place that
+             * drops out to the camera instead. Returns from here only once the
+             * list itself is left. */
+            gbemu_run();
+            camera_resume();
+            s_set.cam_mode = CAM_MODE_GB;
+            s_adjust = load_adjust(s_set.cam_mode);
+            settings_changed(&s_set);
+            s_last_input_us = now_us(); /* a whole session is not idle time */
+        }
+        break;
+
+    default: /* RESUME_VIEWFINDER: s_screen already is it */
+        break;
+    }
 }
 
 esp_err_t app_init(void)
 {
+    /* First thing, before anything can want the C6: the reset line may still
+     * be held low from the last deep sleep, and an RTC hold outlives the wake
+     * (see wifi_gallery_cp_release_hold()). */
+    wifi_gallery_cp_release_hold();
+
+    /* Say why this boot happened: the panel, the SD card and the C6 are in the
+     * same state after a wake as after a power-on, so this line and the resume
+     * record below are the only things that can tell the two apart - and it's
+     * the only way to tell a sleep that worked from one that never fired at
+     * all. WARN rather than INFO because a deep-sleep wake should be the common
+     * case on a battery. */
+    bool woke = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO;
+    if (woke)
+        ESP_LOGW(TAG, "boot: woke from deep sleep, gpio mask 0x%08llx",
+                 (unsigned long long)esp_sleep_get_gpio_wakeup_status());
+    else
+        /* Both numbers, not just "not a sleep wake": a brownout (9) when the
+         * rails are cut and a panic (4) inside esp_deep_sleep_start() would
+         * otherwise read the same from here, and they need opposite fixes. */
+        ESP_LOGW(TAG, "boot: not a gpio sleep wake (cause=%d reset=%d)",
+                 (int)esp_sleep_get_wakeup_cause(), (int)esp_reset_reason());
+    boot_stamp(); /* reset */
+
     settings_load(&s_set);
     s_adjust = load_adjust(s_set.cam_mode);
+    boot_stamp(); /* nvs */
 
     s_cam = plat_calloc_fast(sizeof(gbcam_t));
     s_dc_rgb = calloc(1, (size_t)DC_MAX_W * DC_MAX_H * 3);
@@ -1906,20 +2494,35 @@ esp_err_t app_init(void)
     display_begin_blank(0, 0, 0);
     display_text(DISP_W / 2 - display_text_width("PIXELBOY", 3) / 2, 100, 3, "PIXELBOY", 255, 255, 255);
     display_end_frame();
+    /* display_hw_init() leaves the panel at 100% - bring it straight to the
+     * saved level instead, so the boot splash and everything after it are
+     * already at the level the user picked rather than flashing full-bright. */
+    display_set_backlight(BACKLIGHT_PERCENT[s_set.backlight]);
+    boot_stamp(); /* display */
 
     err = input_init();
     if (err != ESP_OK) {
         PLOGE(TAG, "input init failed: %s", esp_err_to_name(err));
         return err;
     }
+    boot_stamp(); /* input */
+    /* The press that woke the device is not meant for the app - input_init() is
+     * only now polling, so a finger still down would otherwise be the first
+     * thing the resumed screen sees (see app_boot_swallow_poll()). */
+    if (woke) app_boot_swallow_arm();
     storage_init(); /* runs without an SD card; photos are just unavailable */
-    /* Warn now, not just the first time Shutter is pressed - so it's known
+    boot_stamp();   /* sd */    /* Warn now, not just the first time Shutter is pressed - so it's known
      * before shooting starts, not after. No SD card also means no /FRAMES,
      * /ROMS or /PALETTES to scan, so nothing slow follows this that could
      * make the message expire before the live viewfinder is even up. */
     if (!storage_ready()) osd_text("NO SD CARD", NULL);
-    frames_sd_init(frames_boot_progress); /* SD card's /FRAMES and /ROMS, if any - see app_frames_sd.h */
-    if (s_set.frame > (uint8_t)frames_total()) s_set.frame = 0; /* SD content may have changed since this was saved */
+    /* SD card's /FRAMES and /ROMS, if any - backgrounded, so this returns at
+     * once and the viewfinder is up while the card is still being read (see
+     * app_frames_sd.h). The saved frame index is checked against the finished
+     * list later, in frames_settle(), not here - the list is empty here even
+     * on a card full of frames. */
+    frames_sd_start();
+    boot_stamp(); /* frames */
 
     palettes_sd_init(); /* SD card's /PALETTES, if any - see app_palettes_sd.h */
     gbcam_set_extra_palettes(palettes_sd_gb_count(), palettes_sd_gb_rgb, palettes_sd_gb_name);
@@ -1929,9 +2532,11 @@ esp_err_t app_init(void)
      * rgb_mode_active()), one slot past the real palettes. */
     if (s_set.palette > (uint8_t)gbcam_palette_count()) s_set.palette = GBCAM_PALETTE_DEFAULT;
     if (s_set.dc_palette >= (uint8_t)dc_palette_count()) s_set.dc_palette = DC_PALETTE_DEFAULT;
+    boot_stamp(); /* palettes */
 
     err = usb_msc_init();
     if (err != ESP_OK) PLOGW(TAG, "USB MSC init failed: %s - USB photo browsing unavailable", esp_err_to_name(err));
+    boot_stamp(); /* usb */
 
     err = camera_init();
     if (err != ESP_OK) {
@@ -1944,8 +2549,18 @@ esp_err_t app_init(void)
     /* camera_ppa_init(); - disabled for now: real hardware showed visible
      * corruption (right/bottom of frame) with no measurable speed win over
      * the CPU path either, so this isn't earning its risk yet. Code stays
-     * in place (camera_ppa_esp.c) for a more careful follow-up pass -
-     * needs figuring out why before it's worth turning back on. */
+     * in place (camera_ppa_esp.c, and its include above is kept for this one
+     * line) for a more careful follow-up pass - needs figuring out why before
+     * it's worth turning back on. */
+
+    boot_stamp(); /* camera */
+    /* Printed here, before resume_apply() below: that call blocks for as long as
+     * a resumed emulator session lasts, so a timeline printed after it would be
+     * a timeline of the session, not of the boot. */
+    boot_log();
+    /* Where the app really comes back to. Blocks in the emulator case, and
+     * deliberately before the idle clock is stamped below - see app.h. */
+    resume_apply();
 
     s_stats.t0 = now_us();
     s_last_input_us = now_us(); /* don't count boot itself as idle time - see ROW_SLEEP */
@@ -2003,7 +2618,7 @@ static void usb_webcam_feed_screen(void)
 static void usb_webcam_feed_gb(void)
 {
     if (!usb_webcam_active() || s_webcam_mirror) return;
-    if (s_set.frame == 0) {
+    if (!frame_available(s_set.frame)) {
         for (int y = 0; y < GBCAM_H; y++) {
             for (int x = 0; x < GBCAM_W; x++) {
                 const uint8_t *c = gbcam_palette_rgb((gbcam_palette_t)s_set.palette, s_cam->shades[y * GBCAM_W + x]);
@@ -2029,6 +2644,11 @@ static void usb_webcam_feed_gb(void)
 
 void app_step(void)
 {
+    /* The card's frames load in the background (app_frames_sd.h) - both are
+     * one flag read once it's done. */
+    frames_boot_status();
+    frames_settle();
+
     usb_msc_tick();
     if (s_screen == SCREEN_USB && !usb_msc_active()) {
         /* Cable pulled, or the host ejected/released the drive on its own -
@@ -2038,9 +2658,50 @@ void app_step(void)
         s_screen = SCREEN_VIEWFINDER;
     }
 
+    /* An event that's already waiting counts as activity now, before it gets
+     * dispatched below: both update_backlight() and update_standby() read
+     * s_last_input_us, and leaving standby has to have happened by the time an
+     * event like "open the menu" runs its own camera_pause() - reacting a step
+     * later would dispatch that press with the camera still stopped and the
+     * screen still dark, and standby's own camera_resume() would then undo the
+     * pause enter_menu() just made. */
+    /* Read before the pending input below refreshes the idle clock - this is
+     * "was the screen lit when the user touched it". */
+    bool was_standby = s_standby;
+    if (input_pending()) s_last_input_us = now_us();
+    update_standby();
+    update_backlight();
+    /* Every screen, not just the viewfinder it used to be called from - see
+     * its own comment. Cheap: one battery ADC read per app_step(). */
+    check_low_battery();
+
+    /* Unconditionally, once per iteration: this call is what expires the
+     * wake-touch window, so it must not live inside the drain below (see
+     * app_boot_swallow_poll()). */
+    bool boot_swallow = app_boot_swallow_poll();
+
     input_event_t ev;
     while (input_get(&ev, 0)) {
         s_last_input_us = now_us();
+        /* Consumed to wake the screen, not dispatched: standby is entered by
+         * doing nothing, so whatever was pressed into it was asking to see the
+         * screen again, not asking for what that button does - and the live
+         * Shutter lands as a photo of a viewfinder the user couldn't see to
+         * frame.
+         *
+         * The whole touch is swallowed, not just the press in it: s_swallow_press
+         * stays set until the button comes back up (see below), because the
+         * click or long-press that ends this press arrives after the backlight
+         * is already on and would otherwise be dispatched as if the user had
+         * meant it. Same rule and same flag as the emulator loop's (see
+         * run_rom()); the next touch acts normally. */
+        if (was_standby || s_swallow_press || boot_swallow) {
+            /* Only the standby case latches the flag: the boot window expires by
+             * itself (see app_boot_swallow_poll()), so latching it here would
+             * keep swallowing past the end of it. */
+            if (was_standby || s_swallow_press) s_swallow_press = true;
+            continue;
+        }
         if (s_screen == SCREEN_USB) handle_usb_input(&ev);
         else if (s_screen == SCREEN_VIEWFINDER) handle_viewfinder_input(&ev);
         else if (s_screen == SCREEN_MENU) handle_menu_input(&ev);
@@ -2048,15 +2709,29 @@ void app_step(void)
         else handle_gallery_input(&ev);
     }
 
-    /* Not while the SD card's handed to a PC (s_screen==SCREEN_USB implies
-     * usb_msc_active(), given app_step()'s own check above) - cutting power
-     * mid-transfer would be a bad surprise, not just an inconvenience. Same
-     * for mirror mode - sleeping would blank the very screen it's streaming.
-     * Same for the WiFi gallery - a phone could be mid-download. sleep_min
-     * of 0 means "never" (see ROW_SLEEP), not an instant sleep. */
-    int sleep_min = SLEEP_MINUTES[s_set.sleep_min];
-    if (sleep_min != 0 && s_screen != SCREEN_USB && s_screen != SCREEN_WIFI && !usb_webcam_active() &&
-        now_us() - s_last_input_us > (int64_t)sleep_min * 60 * 1000000LL) enter_sleep();
+    /* The waking touch is over once nothing is held and nothing is still
+     * queued. Both conditions matter: the click that ends a press is put in
+     * the queue by the same poll callback that clears the button state, so
+     * checking the button alone would drop the flag in the window between the
+     * two and let exactly the event this exists to swallow through. */
+    if (s_swallow_press && !input_any_held() && !input_pending()) s_swallow_press = false;
+
+    /* Why this fires and when it deliberately doesn't: see app_sleep_due().
+     * Nothing to tear down here - app_step() owns no state that doesn't
+     * survive being reset - so it goes straight to sleep. */
+    if (app_sleep_due(now_us() - s_last_input_us)) app_enter_sleep();
+
+    /* Nothing to draw and nothing to capture - the camera is stopped and the
+     * backlight is out (see update_standby()). Sleep a whole poll interval
+     * rather than running the frame path, which in the viewfinder would just
+     * fail camera_grab() and sleep 10ms itself on every pass. Input arrives
+     * through its own queue, so the next event still wakes this promptly on
+     * the following iteration. */
+    if (s_standby) {
+        plat_sleep_ms(STANDBY_POLL_MS);
+        settings_tick();
+        return;
+    }
 
     if (s_screen == SCREEN_GALLERY) gallery_frame();
     else if (s_screen == SCREEN_USB) usb_screen_frame();

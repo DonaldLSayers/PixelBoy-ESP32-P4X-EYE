@@ -56,6 +56,14 @@ void wifi_gallery_start(void);
 void wifi_gallery_stop(void);
 bool wifi_gallery_active(void);
 
+/* Keeps the C6 in reset for the whole of deep sleep, and gives the pin back on
+ * the way up. Both live here rather than in platform_esp.c because the pin is
+ * ESP-Hosted's own reset line; plat_enter_deep_sleep() calls the first and
+ * app_init() the second. See the implementation for why a plain
+ * gpio_set_level() isn't enough. */
+void wifi_gallery_cp_hold_reset(void);
+void wifi_gallery_cp_release_hold(void);
+
 /* Hardware background, kept for context.
  *
  * The P4 has no WiFi radio of its own - it talks to the onboard C6 over

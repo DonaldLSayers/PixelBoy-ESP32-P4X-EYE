@@ -4,5 +4,5 @@
 #define GBCAM_PALETTE_COUNT 18
 #define GBCAM_PALETTE_DEFAULT 6  /* grayscale */
 #define DC_PALETTE_COUNT 32
-#define DC_PALETTE_DEFAULT 6  /* c64 */
+#define DC_PALETTE_DEFAULT 5  /* c64 */
 #define DC_PALETTE_MAX_COLORS 64

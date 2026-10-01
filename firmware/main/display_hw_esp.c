@@ -111,3 +111,28 @@ void display_hw_present(uint16_t *fb)
 {
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, DISP_W, DISP_H, fb);
 }
+
+void display_hw_set_backlight(int percent)
+{
+    /* bsp_display_brightness_set() has its own LEDC 0..100 clamp and the
+     * "Setting LCD backlight: N%" INFO log on every call - update_backlight()
+     * calls this on every loop iteration, so only actually touch the duty when
+     * the value changes, both to keep the log quiet and to skip a pointless
+     * LEDC write on every encoder detent. */
+    static int s_last = -1;
+    if (percent == s_last) return;
+    s_last = percent;
+    bsp_display_brightness_set(percent);
+}
+
+void display_hw_sleep(void)
+{
+    /* Belt and braces alongside the rail cut that follows (see
+     * plat_enter_deep_sleep()): the sleep-in command stops the panel driving
+     * the glass, and the backlight goes out here rather than being left at
+     * whatever duty the SLEEPING splash used. Both would be moot if
+     * BSP_LCD_EN really does take the whole rail down - which is the point,
+     * nothing here assumes it does. */
+    esp_lcd_panel_disp_on_off(s_panel, false);
+    display_hw_set_backlight(0);
+}

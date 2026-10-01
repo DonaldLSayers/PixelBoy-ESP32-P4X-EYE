@@ -12,7 +12,10 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 
+#include "app_display.h"
 #include "app_input.h"
+#include "app_usb.h"
+#include "app_wifi_gallery.h"
 #include "platform.h"
 
 static const char *TAG = "platform_esp";
@@ -151,11 +154,57 @@ void plat_enter_deep_sleep(void)
      * (releases the on-chip LDO channel bsp_sdcard_mount() claimed) plus its
      * own enable pin (BSP_SD_EN). RTC GPIO holds keep these levels through
      * deep sleep, so the power actually stays cut, not just logically off. */
+    /* Everything below only makes sense while a rail is still up, so the order
+     * here is the order things stop working in, not an arbitrary one.
+     *
+     * The panel and its backlight are the visible half of this: display_sleep()
+     * is the "you're about to lose power" call (panel sleep-in command,
+     * backlight off). Cutting BSP_LCD_EN below probably takes the whole rail
+     * with it, but "probably" isn't worth leaving a backlight driver latched at
+     * whatever duty the last frame left it at - and if the backlight boost
+     * turns out not to be on that rail at all, this is the difference between a
+     * dark screen and a lit one all night.
+     *
+     * Deliberately NOT the BSP's own bsp_display_enter_sleep(), which is the
+     * obvious-looking call here: it works off panel_handle, the BSP's private
+     * panel set up by its LVGL bsp_display_start_with_config() - and this app
+     * never calls that, it builds its own ST7789 in display_hw_esp.c. So
+     * panel_handle is still NULL and the BSP's assert(panel_handle) fires on
+     * the way in, i.e. abort(): the board rebooted instead of sleeping. That
+     * was this sleep path's one real bug - "goes into deep sleep and comes
+     * right back on", with no sleep ever happening. */
+    display_sleep();
+
+    /* The USB PHY, unlike the rails below, has no enable pin to cut - only
+     * the driver keeps it alive, so it has to be told to let go (see
+     * usb_msc_deinit()). */
+    usb_msc_deinit();
+
     bsp_sdcard_unmount();
     bsp_feature_enable(BSP_FEATURE_SD, false);
     bsp_feature_enable(BSP_FEATURE_CAMERA, false);
     bsp_feature_enable(BSP_FEATURE_LCD, false);
+    /* The C6 has no power rail of its own to cut - its reset line has to be
+     * held for the whole sleep instead (see app_wifi_gallery.c), which is also
+     * why this is not just another bsp_feature_enable() call. */
+    wifi_gallery_cp_hold_reset();
 
-    esp_deep_sleep_enable_gpio_wakeup(BIT64(PIN_BTN_SHUTTER), ESP_GPIO_WAKEUP_GPIO_LOW);
+    /* Checked, not assumed: if this ever failed there would be no wake source
+     * at all, and a device that deep-slept with no way back reads as dead
+     * (only a power cycle recovers it) - the one failure here worth a log line
+     * rather than a silent night. GPIO2 is inside the ESP32-P4's deep-sleep
+     * wake mask (GPIO0-15), and CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS
+     * makes IDF drive the pull-up itself on the way in, so the pin can't float
+     * low and wake it straight back up. */
+    esp_err_t wake_err = esp_deep_sleep_enable_gpio_wakeup(BIT64(PIN_BTN_SHUTTER), ESP_GPIO_WAKEUP_GPIO_LOW);
+    if (wake_err != ESP_OK) PLOGE(TAG, "no deep sleep wake source: %s", esp_err_to_name(wake_err));
+
+    /* The level the wake comparator is about to see. If this reads 0 the sleep
+     * is over before it starts - the line is already in its wake condition, so
+     * the only thing left to work out is why (held low by something on the
+     * board, or floating with no working pull-up). Printed rather than acted
+     * on: refusing to sleep on a low would mean never sleeping at all if that
+     * turns out to be this pin's resting state. */
+    PLOGI(TAG, "sleeping: wake pin %d reads %d", PIN_BTN_SHUTTER, gpio_get_level(PIN_BTN_SHUTTER));
     esp_deep_sleep_start(); /* never returns - a wake is a full reset, same as power-on */
 }

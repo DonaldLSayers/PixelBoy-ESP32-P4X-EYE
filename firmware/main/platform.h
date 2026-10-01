@@ -32,6 +32,9 @@ int plat_battery_percent(void);
 
 /* Cuts power to the camera/LCD/SD card and puts the chip into deep sleep,
  * waking only on the shutter button. Never returns: a wake is a full reset,
- * same as power-on, so there's no separate "resume" path - app_init() just
- * runs again. */
+ * same as power-on, so app_init() just runs again.
+ *
+ * A reset, not a cold boot, though - the LP/RTC domain stays powered, which is
+ * what lets RTC GPIO holds survive it and what app.c's resume record lives in
+ * (see s_resume there). Both are gone on a real power-on. */
 void plat_enter_deep_sleep(void);

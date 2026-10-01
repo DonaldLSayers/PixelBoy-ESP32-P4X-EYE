@@ -109,3 +109,9 @@ CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
 # an actual memory shortage (confirmed on real hardware: 160KB+ free internal
 # heap at the time). A couple of spares here costs nothing.
 CONFIG_VFS_MAX_COUNT=10
+
+# A full PSRAM memory test runs on every boot, including every deep-sleep
+# wake, over the whole 200MHz HEX PSRAM - it is a bring-up diagnostic, not
+# something a battery device should pay for on each wake. A real fault here
+# would have shown up long before now.
+CONFIG_SPIRAM_MEMTEST=n

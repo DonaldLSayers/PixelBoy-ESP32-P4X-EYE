@@ -37,18 +37,24 @@ static bool s_webcam_active;
 static uint8_t *s_webcam_jpeg;
 static bool s_webcam_tx_busy;
 
-void usb_webcam_accept(void)
+/* True if webcam mode actually started. It can fail for exactly one reason -
+ * no PSRAM left for the ~126KB JPEG buffer (see s_webcam_jpeg) - and that has
+ * to reach the caller: the alternative is an on-screen "MIRROR ON" over a
+ * stream that will never send a frame, with nothing to retry from and no way
+ * for the user to tell. */
+bool usb_webcam_accept(void)
 {
     if (!s_webcam_jpeg) {
         s_webcam_jpeg = heap_caps_malloc(WEBCAM_JPEG_MAX_BYTES, MALLOC_CAP_SPIRAM);
         if (!s_webcam_jpeg) {
-            PLOGI(TAG, "webcam mode failed - out of PSRAM for JPEG buffer");
-            return;
+            PLOGE(TAG, "webcam mode failed - out of PSRAM for JPEG buffer");
+            return false;
         }
     }
     s_prompt = false;
     s_webcam_active = true;
     PLOGI(TAG, "webcam mode - streaming the GB Camera view over USB");
+    return true;
 }
 
 bool usb_webcam_active(void) { return s_webcam_active; }
@@ -116,6 +122,23 @@ esp_err_t usb_msc_init(void)
     placeholder_attach();
     usb_video_desc_init();
     return tinyusb_driver_install(usb_video_tinyusb_config());
+}
+
+/* USB teardown for deep sleep. usb_msc_init() installs the TinyUSB driver on
+ * every boot and nothing ever took it back down, so the OTG PHY, its
+ * descriptors and the placeholder drive stayed live for the whole sleep, with
+ * nothing plugged in - pure standby load on a device whose entire point is
+ * running off a battery.
+ *
+ * Only reachable from plat_enter_deep_sleep(), which enter_sleep() only gets
+ * to when the SD card is *not* handed to a host (SCREEN_USB) and webcam mode
+ * is off (usb_webcam_active()) - so there is never a transfer in flight to
+ * cut short. Nothing re-installs it on the way back up because there is no
+ * way back up: wake is a reset (see plat_enter_deep_sleep()). */
+void usb_msc_deinit(void)
+{
+    esp_err_t err = tinyusb_driver_uninstall();
+    if (err != ESP_OK) PLOGW(TAG, "tinyusb uninstall: %s", esp_err_to_name(err));
 }
 
 static void sd_host_deinit(void)

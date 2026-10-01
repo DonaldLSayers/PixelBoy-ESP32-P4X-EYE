@@ -58,24 +58,19 @@ def style():
     return img
 
 
-def scale():
+def sleep():
     img = new_icon()
     d = ImageDraw.Draw(img)
-    d.line((2, 13, 13, 2), fill=WHITE, width=2)
-    d.line((2, 13, 2, 9), fill=WHITE, width=2)
-    d.line((2, 13, 6, 13), fill=WHITE, width=2)
-    d.line((13, 2, 9, 2), fill=WHITE, width=2)
-    d.line((13, 2, 13, 6), fill=WHITE, width=2)
+    d.ellipse((3, 2, 14, 13), fill=WHITE)
+    d.ellipse((1, 1, 12, 12), fill=TRANSPARENT)
     return img
 
 
-def method():
+def auto():
     img = new_icon()
     d = ImageDraw.Draw(img)
-    pts = [(2, 12), (4, 8), (6, 11), (8, 5), (10, 9), (12, 4), (14, 7)]
-    for x, y in pts:
-        d.point((x, y), fill=WHITE)
-        d.point((x, y - 1), fill=WHITE)
+    d.ellipse((1, 1, 14, 14), fill=WHITE)
+    d.pieslice((1, 1, 14, 14), start=90, end=270, fill=TRANSPARENT)
     return img
 
 
@@ -99,17 +94,40 @@ def amount():
     return img
 
 
-def denoise():
+def edge():
     img = new_icon()
     d = ImageDraw.Draw(img)
+    d.line((2, 13, 13, 3), fill=WHITE, width=2)
+    d.line((2, 9, 6, 5), fill=WHITE)
+    d.line((6, 13, 10, 9), fill=WHITE)
+    return img
 
-    def star(cx, cy, r):
-        d.line((cx - r, cy, cx + r, cy), fill=WHITE)
-        d.line((cx, cy - r, cx, cy + r), fill=WHITE)
 
-    star(8, 8, 5)
-    star(3, 3, 2)
-    star(13, 12, 2)
+def brightness():
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    d.ellipse((5, 5, 10, 10), fill=WHITE)
+    for x0, y0, x1, y1 in ((8, 0, 8, 3), (8, 12, 8, 15), (0, 8, 3, 8),
+                           (12, 8, 15, 8), (3, 3, 6, 6), (10, 10, 13, 13),
+                           (12, 3, 9, 6), (5, 10, 2, 13)):
+        d.line((x0, y0, x1, y1), fill=WHITE)
+    return img
+
+
+def standby():
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    d.rectangle((1, 2, 14, 12), outline=WHITE, width=2)
+    d.line((3, 11, 12, 4), fill=WHITE, width=2)
+    return img
+
+
+def hdr():
+    img = new_icon()
+    d = ImageDraw.Draw(img)
+    d.ellipse((1, 6, 9, 14), outline=WHITE, width=2)
+    d.ellipse((6, 6, 14, 14), outline=WHITE, width=2)
+    d.ellipse((3, 2, 11, 10), outline=WHITE, width=1)
     return img
 
 
@@ -148,10 +166,14 @@ def wifi():
     return img
 
 
+# Same set and order as tools/gen_icons.py's ICONS list - that's what actually
+# consumes these files, so a placeholder exists for every icon it needs and
+# nothing more.
 ICONS = {
-    "palette": palette, "dither": dither, "style": style, "scale": scale,
-    "method": method, "size": size, "amount": amount, "denoise": denoise,
-    "gallery": gallery, "exit": exit_icon, "frame": frame, "wifi": wifi,
+    "palette": palette, "dither": dither, "style": style, "size": size,
+    "amount": amount, "gallery": gallery, "exit": exit_icon, "frame": frame,
+    "sleep": sleep, "auto": auto, "edge": edge, "wifi": wifi,
+    "brightness": brightness, "standby": standby, "hdr": hdr,
 }
 
 

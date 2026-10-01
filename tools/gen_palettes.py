@@ -42,8 +42,15 @@ def load(sub):
     return out
 
 
+# On-device labels are 12 characters. A filename that would truncate mid-word
+# into something unreadable gets its label here instead.
+LABEL_OVERRIDES = {
+    "ancient_interface": "ANCIENT",
+}
+
+
 def label(name):
-    return name.replace("_", " ").upper()[:12]
+    return LABEL_OVERRIDES.get(name, name.replace("_", " ").upper()[:12])
 
 
 gb = [(n, c) for n, c in load("gb") if len(c) == 4]

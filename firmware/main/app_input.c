@@ -9,8 +9,19 @@
 
 static const char *TAG = "input";
 
-#define POLL_MS 5
-#define DEBOUNCE_SAMPLES 3
+/* Battery: this runs in the esp_timer task, so every tick is a wakeup no
+ * matter how idle the rest of the system is - 5ms meant 200 of them a second,
+ * forever, for four GPIO reads and one PCNT read. There's no polling faster
+ * than the hardware can physically bounce, so 50Hz loses nothing real: the
+ * encoder is counted in the PCNT peripheral itself (a missed poll just makes
+ * the next one emit several detents at once, never drops counts), and a human
+ * button tap is 80ms+ against a 20ms sample.
+ *
+ * DEBOUNCE_SAMPLES drops 3 -> 2 with it: at 20ms/sample, 3 samples would need
+ * a 60ms-confirmed press and start eating genuinely quick taps. 2 samples is
+ * a 20-40ms confirmation window, still well under any real tap. */
+#define POLL_MS 20
+#define DEBOUNCE_SAMPLES 2
 #define LONG_PRESS_MS 600
 
 static const int s_pins[BTN_COUNT] = {PIN_BTN_MENU, PIN_BTN_MODE, PIN_BTN_CAMMODE, PIN_BTN_SHUTTER};
@@ -106,6 +117,17 @@ esp_err_t input_init(void)
 {
     s_queue = xQueueCreate(16, sizeof(input_event_t));
 
+    /* A hold outlives the reset that a deep sleep wakes from - the reason
+     * wifi_gallery_cp_release_hold() exists for the C6's reset pin, and IDF
+     * holds the wake pin itself on the way into sleep (esp_hw_support's
+     * gpio_deep_sleep_wakeup_prepare), so this pad is left held on every boot
+     * that follows one. Whether that ever actually costs anything here is
+     * unconfirmed - nothing about it has been measured on hardware - so this is
+     * insurance, not a fix: a released pad is one gpio_config() can fully
+     * describe again. Not an error if there was nothing to release, it runs on
+     * every boot. */
+    for (int i = 0; i < BTN_COUNT; i++) gpio_hold_dis((gpio_num_t)s_pins[i]);
+
     uint64_t mask = 0;
     for (int i = 0; i < BTN_COUNT; i++) mask |= 1ULL << s_pins[i];
     const gpio_config_t io = {
@@ -127,4 +149,17 @@ esp_err_t input_init(void)
 bool input_get(input_event_t *ev, uint32_t timeout_ms)
 {
     return xQueueReceive(s_queue, ev, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+}
+
+bool input_pending(void) { return uxQueueMessagesWaiting(s_queue) > 0; }
+
+/* Read from the main task, written by poll_cb() in the esp_timer task. Each
+ * flag is a single byte, so a torn read isn't possible and an answer that is
+ * one poll (20ms) stale is exactly as good as a fresh one here - see its
+ * comment in app_input.h. */
+bool input_any_held(void)
+{
+    for (int i = 0; i < BTN_COUNT; i++)
+        if (s_btn[i].pressed) return true;
+    return false;
 }

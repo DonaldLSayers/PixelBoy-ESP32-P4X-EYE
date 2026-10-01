@@ -45,3 +45,15 @@ esp_err_t input_init(void);
 
 /* Wait up to timeout_ms for the next event. Returns false on timeout. */
 bool input_get(input_event_t *ev, uint32_t timeout_ms);
+
+/* Is an event already waiting? Lets a caller that isn't ready to consume the
+ * queue yet still know the user has done something - see app_step()'s use of
+ * this to leave backlight standby before it dispatches what it just found. */
+bool input_pending(void);
+
+/* Is any button down right now (debounced, as the events are)? A press is
+ * several events, not one - the click or long-press that ends it arrives
+ * hundreds of ms later - so a caller that swallowed a press to wake the
+ * screen needs this to know when the whole touch is over and it can start
+ * listening again. See the drain in app_step()/run_rom(). */
+bool input_any_held(void);

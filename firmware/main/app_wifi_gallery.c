@@ -1,8 +1,11 @@
-/* Diagnostic/bring-up only for now (see app_wifi_gallery.h) - checks
+/* The WiFi gallery: the first half (see wifi_gallery_diag()/main.c) checks
  * whether the onboard C6 is reachable over SDIO, and if it's running a
  * blank/stub image, pushes real coprocessor firmware to it over that same
- * link via ESP-Hosted's OTA API - no external adapter needed. Doesn't
- * bring up an AP or touch the gallery yet.
+ * link via ESP-Hosted's OTA API - no external adapter needed. The second half
+ * (wifi_gallery_start(), reached from the menu's WiFi Gallery row) is the
+ * gallery itself: a WPA2 AP on the fixed SSID/PASS below plus an HTTP server
+ * serving the /GBCAM photos and thumbnails to whatever joins it (see
+ * app.c's SCREEN_WIFI).
  *
  * esp_wifi_init() is called first (even though it may fail while the
  * coprocessor's still blank) rather than only the lower-level eh_host_init/
@@ -19,6 +22,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "eh_host_transport_config.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
@@ -490,4 +494,62 @@ void wifi_gallery_stop(void)
     esp_wifi_deinit();
     cp_power_down();
     s_active = false;
+}
+
+/* ---- the C6 across deep sleep ------------------------------------------
+ *
+ * cp_power_down() only pulls the reset line low with a plain gpio_set_level().
+ * That holds for as long as the P4 is running, but the pad belongs to the
+ * digital domain, which is powered down for the whole of deep sleep - so the
+ * pin comes back to whatever the board's own pull does, and a C6 with its
+ * enable released runs its own firmware unattended the entire time the device
+ * is "asleep". Nothing else on this board is both that conspicuous and that
+ * invisible from outside, which is why a full night's sleep still costs real
+ * battery.
+ *
+ * rtc_gpio_* is the one mechanism that survives deep sleep, and it's the same
+ * one the BSP already uses for BSP_LCD_EN/BSP_CAMERA_EN (esp32_p4_eye.c's
+ * bsp_feature_enable()), which is also what keeps ESP_PD_DOMAIN_RTC_PERIPH
+ * powered - the hold wouldn't outlive the sleep otherwise. GPIO9 sits in the
+ * same LP GPIO range as those two, hence the same treatment.
+ *
+ * Taken from the Kconfig value rather than from
+ * eh_host_transport_get_reset_config() because the release half runs at boot,
+ * before esp_hosted has been initialised at all. It is the same pin by
+ * construction - that's what the transport itself reads. */
+#define CP_RESET_GPIO ((gpio_num_t)CONFIG_ESP_HOSTED_HOST_RESET_GPIO)
+
+void wifi_gallery_cp_hold_reset(void)
+{
+    /* No-op unless the gallery is somehow still up, which the guards on
+     * enter_sleep() already rule out - belt and braces so the C6 is never left
+     * with its link running and its reset line held at the same time. */
+    wifi_gallery_stop();
+
+    /* Logged rather than ignored (the BSP ignores these): if GPIO9 turns out
+     * not to be RTC-capable after all, that's the whole reason the C6 keeps
+     * running through the sleep, and silently leaving the pin where it was
+     * would look identical to "the fix didn't help". */
+    esp_err_t err = rtc_gpio_init(CP_RESET_GPIO);
+    if (err == ESP_OK) err = rtc_gpio_set_direction(CP_RESET_GPIO, RTC_GPIO_MODE_OUTPUT_ONLY);
+    if (err == ESP_OK) err = rtc_gpio_set_level(CP_RESET_GPIO, 0);
+    if (err == ESP_OK) err = rtc_gpio_hold_en(CP_RESET_GPIO);
+    if (err != ESP_OK) ESP_LOGW(TAG, "can't hold the C6 in reset for sleep: %s", esp_err_to_name(err));
+}
+
+void wifi_gallery_cp_release_hold(void)
+{
+    /* A deep-sleep wake is a reset, but it does not clear an RTC hold - so
+     * without this the pin would stay held in reset for the whole next
+     * session, and wifi_gallery_start() could never bring the C6 back up. */
+    rtc_gpio_hold_dis(CP_RESET_GPIO);
+    rtc_gpio_deinit(CP_RESET_GPIO);
+
+    /* rtc_gpio_deinit() returns the pad to the digital domain but leaves it
+     * unconfigured, i.e. floating - which is exactly the state that lets the
+     * C6 come up on its own. Drive it low instead, the same steady state
+     * cp_power_down() leaves behind, until cp_power_up() releases it. */
+    const gpio_config_t io = {.pin_bit_mask = 1ULL << CP_RESET_GPIO, .mode = GPIO_MODE_OUTPUT};
+    gpio_config(&io);
+    gpio_set_level(CP_RESET_GPIO, 0);
 }

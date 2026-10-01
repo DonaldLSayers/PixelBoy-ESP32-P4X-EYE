@@ -14,14 +14,14 @@
  * where the frame-extraction feature archives a ROM once it's scanned it
  * once, untouched and just as playable as the original.
  *
- * gbemu_run() is reached from the real menu (ROW_GBEMU in app.c) or by
- * cycling the Bottom button past DIGICAM (CAM_MODE_EMULATOR in app.c) as a
- * self-contained blocking excursion: it shows a scrollable ROM list (encoder
- * scrolls, Shutter picks, Menu or CamMode cancels back to the camera app),
- * then for a GB Camera ROM a save-slot picker (any number of slots, one
- * .sav each - new photos in a slot auto-export into the regular /GBCAM
- * gallery every time you exit a session using it), then runs the chosen
- * ROM/save.
+ * gbemu_run() is reached by cycling the Bottom button past DIGICAM
+ * (CAM_MODE_EMULATOR in app.c) as a self-contained blocking excursion: it shows
+ * a scrollable ROM list (encoder scrolls, Shutter picks, Menu or CamMode
+ * cancels back to the camera app), then a save-slot picker (up to
+ * GBCAM_MAX_SAVE_SLOTS slots, one .sav each - new photos in a slot export
+ * into the regular /GBCAM gallery from the ROM list's "PULL NEW PHOTOS" row,
+ * which is a deliberate pick, not something a session end triggers), then
+ * runs the chosen ROM/save.
  *
  * While playing: Shutter is A, Mode is Start (true press/release, both held
  * as long as the physical button is). Menu click is B and CamMode click is
@@ -31,5 +31,25 @@
  * The encoder's momentary taps cover one axis at a time - Left/Right by
  * default, or Up/Down after holding CamMode to toggle (same idiom as Mode-
  * button-click switching what the encoder adjusts in the normal camera
- * app). Holding Menu exits back to the camera app. */
+ * app). Holding Menu ends that session and lands back on the ROM list, so a
+ * second game is one pick away; leaving the *list* - Menu on it, or CamMode on
+ * the save list - is what returns to the camera app. */
 void gbemu_run(void);
+
+/* Run one specific ROM + save slot, skipping both pickers - the deep-sleep
+ * resume path (see app.c's resume record). Returns false, having run nothing,
+ * if there's no SD card, the ROM file is gone, or the session failed to start
+ * at all (unreadable ROM, out of memory, a .state that turned out to be
+ * corrupt - see run_rom()); the caller then leaves the viewfinder up rather
+ * than guessing. True means a session actually ran, however it ended.
+ *
+ * A missing .state is not a failure: run_rom() starts that ROM+slot from its
+ * .sav, exactly as picking it from the slot list would. Whether a state
+ * belongs to this ROM is decided inside gb_state_read() by the ROM's own CRC,
+ * so a stale state from another game (or another build) can't be loaded - it
+ * is discarded instead.
+ *
+ * Ending a resumed session behaves like ending any other: the caller follows
+ * this with gbemu_run(), so its exit lands on the ROM list rather than out in
+ * the viewfinder. */
+bool gbemu_run_rom(const char *rom_path, int slot);

@@ -58,33 +58,6 @@ void display_begin_native(const uint8_t *rgb888, int w, int h)
     }
 }
 
-void display_begin_frame(const uint8_t *shades, gbcam_palette_t palette)
-{
-    s_fb = display_hw_acquire();
-    uint16_t *fb = s_fb;
-    uint16_t lut[4];
-    for (int i = 0; i < 4; i++) {
-        const uint8_t *c = gbcam_palette_rgb(palette, (uint8_t)i);
-        lut[i] = rgb565(c[0], c[1], c[2]);
-    }
-
-    /* Bars in the darkest palette colour. */
-    for (int i = 0; i < DISP_W * DISP_IMG_Y; i++) fb[i] = lut[3];
-    for (int i = (DISP_IMG_Y + 224) * DISP_W; i < DISP_W * DISP_H; i++) fb[i] = lut[3];
-
-    /* 2x image, source columns 4..123 (crop 4 source px = 8 screen px each side). */
-    for (int sy = 0; sy < GBCAM_H; sy++) {
-        const uint8_t *src = shades + sy * GBCAM_W + 4;
-        uint16_t *d0 = fb + (DISP_IMG_Y + sy * 2) * DISP_W;
-        uint16_t *d1 = d0 + DISP_W;
-        for (int sx = 0; sx < DISP_W / 2; sx++) {
-            uint16_t c = lut[src[sx] & 3];
-            d0[sx * 2] = d0[sx * 2 + 1] = c;
-            d1[sx * 2] = d1[sx * 2 + 1] = c;
-        }
-    }
-}
-
 /* ------------------------------------------------ viewfinder scroll bars */
 
 /* 7x7 round end cap and 5x5 ball knob, drawn at 2x. '#' = shade 0 (lightest),
@@ -283,9 +256,9 @@ void display_begin_viewfinder(const uint8_t *shades, gbcam_palette_t palette,
  * emulator's 160x144->240x240 every single frame, in particular) call this
  * with the same (w, h, rw, rh) over and over. Recomputing every destination
  * pixel's source range via integer division 57600 times a frame was real,
- * measured cost (see app_gbemu.c's own frame-timing log) for work that's
- * identical frame to frame - cache it instead, keyed on those four inputs,
- * and only recompute when one actually changes (a different mode/photo
+ * measured cost (the emulator's own per-frame timing when this was added) for
+ * work that's identical frame to frame - cache it instead, keyed on those four
+ * inputs, and only recompute when one actually changes (a different mode/photo
  * size). ox/oy still depend on rx/ry too, but are cheap to redo every call. */
 static void fit_rect(const uint8_t *rgb888, int w, int h, int rx, int ry, int rw, int rh)
 {
@@ -356,10 +329,13 @@ void display_begin_camera(const uint8_t *rgb888, int w, int h, bool fill)
     for (int i = 0; i < DISP_W * DISP_H; i++) s_fb[i] = 0;
 
     if (fill) {
-        /* PPA hardware scale first - falls back to the CPU box-average path
-         * if unavailable/fails (see camera_ppa_scale_to_rgb565()'s own
-         * comment). Was real, measured cost for the GB emulator's own
-         * per-frame draw (app_gbemu.c's frame-timing log). */
+        /* PPA hardware scale first, CPU box-average path as the fallback.
+         * The PPA is currently never initialised - camera_ppa_init() is
+         * commented out in app.c's app_init() (real hardware showed visible
+         * corruption for no measurable speed win), so this call always takes
+         * the fallback today. Left in place rather than deleted so the two
+         * stay in step if that gets switched back on; see
+         * camera_ppa_scale_to_rgb565()'s own comment. */
         if (!camera_ppa_scale_to_rgb565(rgb888, w, h, s_fb, DISP_W, DISP_H))
             area_fit(rgb888, w, h);
         return;
@@ -585,7 +561,8 @@ void display_menu(const char *title, const char *const *labels, const char *cons
      * space between three widely spaced lines. Rows pack from the top; any
      * leftover height on a shorter menu just stays black. A menu longer than
      * that scrolls, keeping the selected row in view (GB Camera's own menu
-     * is the one that needs it, at 8 rows since ROW_SLEEP was added). */
+     * is the one that needs it, at 13 rows since ROW_BACKLIGHT/ROW_STANDBY
+     * were added - see build_menu() in app.c). */
     int rows_top = y + 30, rows_h = h - 30 - 6;
     int row_h = rows_h / MENU_MAX_VISIBLE;
     /* Stays put until the selection would run off the bottom of the visible
@@ -699,3 +676,7 @@ void display_end_frame(void)
 }
 
 const uint16_t *display_last_frame(void) { return s_fb; }
+
+void display_set_backlight(int percent) { display_hw_set_backlight(percent); }
+
+void display_sleep(void) { display_hw_sleep(); }

@@ -1,12 +1,13 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "frames.h"
 #include "gbcam.h"
 
 /* Composites a decorative border (a frame_meta_t - either one of frames.h's
- * built-ins, or one loaded from the SD card's /frames folder at boot, see
+ * built-ins, or one loaded from the SD card's /FRAMES folder at boot, see
  * app_frames_sd.h) around a GB Camera photo, recoloured with the same
  * 4-colour palette the photo itself used - ported from PixelBoy's own
  * Android app (engine/frames/Frames.kt's compose()). `shades` is GBCAM_W x
@@ -22,9 +23,18 @@ void frame_compose_rgb(const frame_meta_t *frame, const uint8_t *shades, gbcam_p
                        int scale, uint8_t *out_rgb);
 
 /* Every selectable frame: frames.h's built-ins (index 0..FRAME_COUNT-1)
- * followed by whatever tools/frames_sd_init() loaded from the SD card's
- * /frames folder at boot (see app_frames_sd.h) - one combined list so the
+ * followed by whatever frames_sd_start() loaded from the SD card's
+ * /FRAMES folder at boot (see app_frames_sd.h) - one combined list so the
  * menu/dial don't need to know which source a frame came from. */
 int frames_total(void);
+
+/* True if `frame` - the 1-based s_set.frame selection - is a frame that can
+ * actually be drawn or photographed right now: 0 (no frame) and a stale index
+ * past the end of the list are both false. The list's SD half loads in the
+ * background at boot, so an SD frame is not available until it has. Anything
+ * about to call frames_get() and then frame_compose_rgb() on the result needs
+ * this - that frame's pixel data doesn't exist until then. */
+bool frame_available(int frame);
+
 const frame_meta_t *frames_get(int index);
 const char *frames_get_name(int index);

@@ -152,7 +152,7 @@ static void write_thumbnail(const char *prefix, int number, const uint8_t *rgb88
 }
 
 /* GB Camera's own captures are GBnnnnn, photos pulled out of a GB emulator
- * .sav (see app_gbemu.c's export_photos_from_sav()) are EMUnnnnn - both
+ * .sav (see app_gbemu.c's pull_new_photos_from_sav()) are EMUnnnnn - both
  * live in the same BIN/ subfolder and share one numbering sequence, just
  * distinguished by this prefix. Matches name against prefix case-
  * insensitively, then parses the number/extension after it. */
@@ -316,7 +316,7 @@ esp_err_t storage_init(void)
 
 bool storage_ready(void) { return s_ready; }
 /* SD card mount root (e.g. "/sdcard"), or "" if there's no card - for other
- * SD-backed features (frames_sd_init()'s /frames folder) that need it but
+ * SD-backed features (frames_sd_start()'s /FRAMES folder) that need it but
  * shouldn't mount the card a second time. */
 const char *storage_root(void) { return s_ready ? s_root : ""; }
 int storage_count(void) { return s_count; }
@@ -339,23 +339,29 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
      * just the plain photo, regardless of frame (see app_storage.h). */
     static uint8_t tiles[GBCAM_TILES_SIZE];
     gbcam_shades_to_tiles(shades, tiles);
-    bin_path_for(path, sizeof path, prefix, number);
-    FILE *f = fopen(path, "wb");
+    char bin_path[300];
+    bin_path_for(bin_path, sizeof bin_path, prefix, number);
+    FILE *f = fopen(bin_path, "wb");
     if (!f) {
-        PLOGE(TAG, "cannot write %s", path);
+        PLOGE(TAG, "cannot write %s", bin_path);
         return -1;
     }
     size_t written = fwrite(tiles, 1, sizeof tiles, f);
     fclose(f);
     if (written != sizeof tiles) {
-        remove(path);
+        remove(bin_path);
         return -1;
     }
 
     /* Upscaled PNG in the current palette, framed if requested. */
     int w, h;
     uint8_t *rgb;
-    if (frame >= 0) {
+    /* frame_available(): the caller passes an index into the combined frame
+     * list, and the card's half of it only exists once its background load has
+     * finished (app_frames.h) - frames_get() would otherwise hand back an entry
+     * with no pixel data for frame_compose_rgb() below to walk off the end of.
+     * A frame that isn't loaded yet saves as an unframed photo. */
+    if (frame_available(frame)) {
         const frame_meta_t *fm = frames_get(frame);
         frame_size(fm, PNG_SCALE, &w, &h);
         rgb = malloc((size_t)w * h * 3);
@@ -374,10 +380,27 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
     }
     if (rgb) {
         path_for(path, sizeof path, prefix, number, "PNG");
-        if (!stbi_write_png(path, w, h, 3, rgb, w * 3))
-            PLOGW(TAG, "PNG write failed: %s", path);
+        if (!stbi_write_png(path, w, h, 3, rgb, w * 3)) {
+            /* The .PNG is the photo - the .BIN beside it is only the raw tiles
+             * the gallery's framed view is built from, so a .BIN without one is
+             * unreadable, and prune_orphaned_bins() deletes it on the next boot
+             * anyway (app_storage.c:198). Registering the photo regardless (the
+             * way this used to) means telling the user "saved GBnnnnn", showing
+             * it in the gallery until the reboot, then losing it silently with a
+             * hole left in the shared numbering. Drop it the same way
+             * storage_save_dc() does. */
+            PLOGE(TAG, "PNG write failed: %s - photo dropped", path);
+            remove(bin_path);
+            free(rgb);
+            return -1;
+        }
         write_thumbnail(prefix, number, rgb, w, h);
         free(rgb);
+    } else {
+        /* Couldn't allocate the RGB buffer - same thing, no PNG was written. */
+        PLOGE(TAG, "no memory for the PNG of %s%05d - photo dropped", prefix, number);
+        remove(bin_path);
+        return -1;
     }
 
     photo_t *p = &s_photos[s_count++];
@@ -442,20 +465,6 @@ bool storage_save_aeb_extra_rgb(const uint8_t *rgb888, int number, int step)
     bool ok = write_aeb_png(rgb, w, h, number, step);
     free(rgb);
     return ok;
-}
-
-esp_err_t storage_load(int number, uint8_t *shades)
-{
-    char path[300];
-    static uint8_t tiles[GBCAM_TILES_SIZE];
-    bin_path_for(path, sizeof path, gb_prefix_for(number), number);
-    FILE *f = fopen(path, "rb");
-    if (!f) return ESP_ERR_NOT_FOUND;
-    size_t n = fread(tiles, 1, sizeof tiles, f);
-    fclose(f);
-    if (n != sizeof tiles) return ESP_ERR_INVALID_SIZE;
-    gbcam_tiles_to_shades(tiles, shades);
-    return ESP_OK;
 }
 
 /* Byte-for-byte match against every existing GB/EMU photo's .BIN (skips DC,
@@ -547,11 +556,10 @@ esp_err_t storage_load_dc(int number, uint8_t **out_rgb, int *out_w, int *out_h)
     return ESP_OK;
 }
 
-/* Decodes a saved GBnnnnn.PNG back to RGB888 - unlike storage_load()'s .BIN
- * tiles, this is the actual upscaled export: whatever palette and frame (if
- * any) the photo was saved with, baked in, not the .BIN's palette-free
- * shades re-rendered with whatever's currently selected. Frees the same way
- * as storage_load_dc(). */
+/* Decodes a saved GBnnnnn.PNG back to RGB888 - the actual upscaled export:
+ * whatever palette and frame (if any) the photo was saved with, baked in,
+ * not the .BIN's palette-free shades re-rendered with whatever's currently
+ * selected. Frees the same way as storage_load_dc(). */
 esp_err_t storage_load_gb_png(int number, uint8_t **out_rgb, int *out_w, int *out_h)
 {
     char path[300];

@@ -40,6 +40,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "esp_heap_caps.h"
+
 #include "stb_image.h"
 #include "stb_image_write.h"
 
@@ -62,9 +67,26 @@ static char s_names[MAX_SD_FRAMES][32]; /* fits the longest FRAME_NAME_OVERRIDES
  * them and not worth repeating 200 times over; frames_sd_get() rebuilds the
  * full path from s_root when it actually needs it. */
 static char s_filenames[MAX_SD_FRAMES][48];
+/* The published list: everything the rest of the app can see. Zero until the
+ * background scan (frames_sd_start()) has finished filling it, then written
+ * once, with the entries above already in place - so a caller polling
+ * frames_sd_ready() never sees a half-built list, and frames_total() (which
+ * reads this through frames_sd_count()) reports just frames.h's built-ins for
+ * the second or so the scan takes. s_n below is that same count while the scan
+ * is still running: the working counter, invisible outside this file. */
 static int s_count;
-static char s_root[224];               /* SD mount root, set at the top of frames_sd_init() */
-static frames_sd_progress_cb s_progress;
+static int s_n;
+static volatile bool s_ready;
+static char s_root[224];               /* SD mount root, set at the top of the scan */
+
+/* Latest progress line, published by the scan task (which must not touch the
+ * display itself - the main task owns that) and collected by the UI with
+ * frames_sd_status(). s_status_seq is bumped on every change so the reader can
+ * tell new text from one it has already shown. */
+static char s_status_l1[40];
+static char s_status_l2[40];
+static volatile uint32_t s_status_seq;
+static uint32_t s_status_seen;
 
 /* The one frame currently decoded into RAM (whichever was last asked for by
  * frames_sd_get()) - freed/replaced, never more than one at a time. */
@@ -79,8 +101,12 @@ static uint8_t *s_cached_indices;
  * this copy. */
 static void report(const char *l1, const char *l2)
 {
-    if (!s_progress) return;
-    if (!l2) { s_progress(l1, l2); return; }
+    if (!l2) {
+        snprintf(s_status_l1, sizeof s_status_l1, "%s", l1);
+        s_status_l2[0] = 0;
+        s_status_seq++;
+        return;
+    }
     char pretty[40];
     size_t n = 0;
     int depth = 0;
@@ -94,7 +120,9 @@ static void report(const char *l1, const char *l2)
     }
     while (n > 0 && pretty[n - 1] == ' ') n--;
     pretty[n] = 0;
-    s_progress(l1, pretty);
+    snprintf(s_status_l1, sizeof s_status_l1, "%s", l1);
+    snprintf(s_status_l2, sizeof s_status_l2, "%s", pretty);
+    s_status_seq++;
 }
 
 /* hardware shade index (0=lightest..3=darkest) -> grayscale byte that
@@ -150,10 +178,50 @@ static void write_frame_png(const char *file_stem, int w, int h, const uint8_t *
  * the initial scan (PNG sources decode fully up front, to dedupe by pixel
  * content) and frames_sd_get()'s on-demand reload of whichever frame is
  * currently selected. */
+/* A PNG's bytes, read in one go.
+ *
+ * stb_image's own file path pulls the stream through stbi__get8(), i.e. one
+ * byte per fread() - and every one of those is a VFS lock plus a FatFs call
+ * here, so a 160x144 frame's ~20 KB of PNG stream cost ~16ms to decode and 73
+ * of them was over a second of boot (measured: 1072ms of the 1567ms /FRAMES
+ * scan). Handing stb_image the whole file as memory instead is one read and
+ * decodes byte-identically.
+ *
+ * The cap is a guard, not a format limit: a frame past it falls back to the
+ * streaming path rather than being refused or allocated blind. */
+#define PNG_IN_MEMORY_MAX (512 * 1024)
+
+static uint8_t *read_file_to_mem(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = (len > 0 && len <= PNG_IN_MEMORY_MAX) ? malloc((size_t)len) : NULL;
+    if (buf && fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf);
+        buf = NULL;
+    }
+    fclose(f);
+    if (buf) *out_len = (size_t)len;
+    return buf;
+}
+
 static uint8_t *decode_png_to_indices(const char *path, int *out_w, int *out_h, int *out_photo_y)
 {
     int w, h, comp;
-    uint8_t *rgba = stbi_load(path, &w, &h, &comp, 4);
+    size_t blob_len = 0;
+    /* Whole file in first, decoded from that rather than through stbi_load()'s
+     * own byte-at-a-time stdio - one SD read per file instead of several
+     * hundred (each of which costs ~5ms in card round-trips on this board, see
+     * app_storage.c's SD notes). Falls back to the streaming path for anything
+     * past PNG_IN_MEMORY_MAX, which is only a frame far larger than the
+     * 160x224 this pipeline accepts anyway. */
+    uint8_t *blob = read_file_to_mem(path, &blob_len);
+    uint8_t *rgba = blob ? stbi_load_from_memory(blob, (int)blob_len, &w, &h, &comp, 4)
+                         : stbi_load(path, &w, &h, &comp, 4);
+    free(blob);
     if (!rgba) {
         PLOGW(TAG, "%s: not a readable PNG", path);
         return NULL;
@@ -224,7 +292,7 @@ static const char *find_duplicate(int w, int h, const uint8_t *indices)
     for (int i = 0; i < FRAME_COUNT; i++)
         if (same_canvas(frame_meta[i].w, frame_meta[i].h, frame_meta[i].indices, w, h, indices))
             return frame_names[i];
-    for (int i = 0; i < s_count; i++)
+    for (int i = 0; i < s_n; i++) /* s_n, not s_count - see s_count's comment */
         if (same_canvas(s_meta[i].w, s_meta[i].h, s_meta[i].indices, w, h, indices))
             return s_names[i];
     return NULL;
@@ -252,7 +320,7 @@ static bool add_frame_ex(const char *name, const char *path, const char *file_st
         free(indices);
         return false;
     }
-    if (s_count >= MAX_SD_FRAMES) {
+    if (s_n >= MAX_SD_FRAMES) {
         PLOGW(TAG, "cap of %d reached, skipping \"%s\"", MAX_SD_FRAMES, name);
         free(indices);
         return false;
@@ -262,10 +330,10 @@ static bool add_frame_ex(const char *name, const char *path, const char *file_st
         write_frame_png(file_stem, w, h, indices, written, sizeof written);
         path = written;
     }
-    s_meta[s_count] = (frame_meta_t){w, h, photo_y, NULL}; /* loaded on demand - see frames_sd_get() */
+    s_meta[s_n] = (frame_meta_t){w, h, photo_y, NULL}; /* loaded on demand - see frames_sd_get() */
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    snprintf(s_filenames[s_count], sizeof s_filenames[s_count], "%s", base);
+    snprintf(s_filenames[s_n], sizeof s_filenames[s_n], "%s", base);
     free(indices);
     /* Uppercase, and '-'/'_' (common word separators in a filename) read as
      * spaces - "game_boy_camera" shows as "GAME BOY CAMERA" (then truncated
@@ -273,10 +341,10 @@ static bool add_frame_ex(const char *name, const char *path, const char *file_st
      * affects PNG/JSON sources, whose display name comes from a filename or
      * pack field - ROM sources' names here are always "STD"/"WILD" + a
      * number, nothing to replace. */
-    snprintf(s_names[s_count], sizeof s_names[s_count], "%.*s", (int)(sizeof s_names[s_count] - 1), name);
-    for (char *c = s_names[s_count]; *c; c++)
+    snprintf(s_names[s_n], sizeof s_names[s_n], "%.*s", (int)(sizeof s_names[s_n] - 1), name);
+    for (char *c = s_names[s_n]; *c; c++)
         *c = (char)((*c == '-' || *c == '_') ? ' ' : toupper((unsigned char)*c));
-    s_count++;
+    s_n++;
     return true;
 }
 
@@ -1171,11 +1239,17 @@ static void scan_folder(const char *root, const char *name,
     closedir(d);
 }
 
-void frames_sd_init(frames_sd_progress_cb progress)
+/* The scan itself. Runs on the task made by frames_sd_start() below, never on
+ * the caller's - everything here is either local or written before s_count is
+ * published, so nothing it builds is visible to the rest of the app until the
+ * very last line. */
+static void frames_sd_scan(void)
 {
-    s_progress = progress;
     const char *root = storage_root();
-    if (!root[0]) return; /* no SD card */
+    if (!root[0]) { /* no SD card */
+        s_ready = true;
+        return;
+    }
     snprintf(s_root, sizeof s_root, "%s", root);
 
     char dir[256];
@@ -1184,16 +1258,85 @@ void frames_sd_init(frames_sd_progress_cb progress)
     snprintf(dir, sizeof dir, "%s/ROMS", root);
     plat_mkdir(dir);
 
+    int64_t t0 = plat_now_us();
     scan_folder(root, "FRAMES", load_png, load_json, NULL, NULL);
-    int after_frames = s_count;
+    int after_frames = s_n;
     scan_folder(root, "ROMS", NULL, NULL, load_gb, load_zip);
-    int from_roms = s_count - after_frames;
+    int from_roms = s_n - after_frames;
 
-    PLOGI(TAG, "%d frame(s) from /FRAMES, %d from /ROMS", after_frames, from_roms);
     if (from_roms > 0) {
         char line[24];
         snprintf(line, sizeof line, "%d NEW FRAME%s", from_roms, from_roms == 1 ? "" : "S");
         report("CONVERTED", line);
     }
-    s_progress = NULL;
+    /* Worth a line even though this no longer blocks anything: it's the only
+     * record of how long the card took, and the ~1.6s a card of /FRAMES costs
+     * (measured) is what made this a background task in the first place. */
+    PLOGI(TAG, "%d frame(s) from the SD card in %lldms (%d converted from /ROMS)",
+          s_n, (long long)((plat_now_us() - t0) / 1000), from_roms);
+    /* Publish, in this order: the entries are all in place before the count
+     * that makes them reachable goes up, and s_ready last of all. A reader
+     * polling frames_sd_ready() therefore never indexes an entry that hasn't
+     * been written yet. The fence is what actually guarantees that - this task
+     * is on core 1 and every reader is on core 0. */
+    __sync_synchronize();
+    s_count = s_n;
+    s_ready = true;
+    __sync_synchronize();
+}
+
+/* The task's own entry point, so the inline fallback in frames_sd_start()
+ * doesn't delete the main task when it reaches the end of the scan. */
+static void frames_sd_task(void *arg)
+{
+    (void)arg;
+    frames_sd_scan();
+    vTaskDelete(NULL);
+}
+
+/* Boot does not wait for the SD card's frames any more: scanning /FRAMES and
+ * /ROMS costs ~1.6s on a card with a few dozen frames (measured), which was
+ * two thirds of app_init()'s whole time - spent before the viewfinder, the menu
+ * or anything else could appear. The scan is the same work either way, it just
+ * happens while the app is already usable: until s_ready, frames_total()
+ * reports only frames.h's built-ins and the overlay is simply absent (see
+ * frame_available()), then the list fills in behind the user.
+ *
+ * Core 1, below the background capture task's priority (app_gbemu.c) so a
+ * running emulator session still gets its camera frames on time. Only ever
+ * started once. */
+#define FRAMES_SCAN_TASK_STACK 12288
+#define FRAMES_SCAN_TASK_PRIO (tskIDLE_PRIORITY + 1)
+
+void frames_sd_start(void)
+{
+    static bool started;
+    static StaticTask_t tcb;
+    static uint8_t *stack;
+    if (started) return;
+    started = true;
+
+    /* Stack out of PSRAM, same reasoning as the background capture task: an
+     * xTaskCreatePinnedToCore() stack comes out of internal RAM, and running
+     * out of that here would silently leave the frame list empty forever. */
+    stack = heap_caps_malloc(FRAMES_SCAN_TASK_STACK, MALLOC_CAP_SPIRAM);
+    if (stack && xTaskCreateStaticPinnedToCore(frames_sd_task, "frames_scan", FRAMES_SCAN_TASK_STACK, NULL,
+                                               FRAMES_SCAN_TASK_PRIO, stack, &tcb, 1)) {
+        return;
+    }
+    /* No stack, or no task - scan inline. Slow boot beats no frames at all. */
+    PLOGW(TAG, "background scan unavailable, loading frames before boot continues");
+    frames_sd_scan();
+}
+
+bool frames_sd_ready(void) { return s_ready; }
+
+bool frames_sd_status(char *l1, size_t n1, char *l2, size_t n2)
+{
+    uint32_t seq = s_status_seq;
+    if (seq == s_status_seen) return false;
+    s_status_seen = seq;
+    snprintf(l1, n1, "%s", s_status_l1);
+    snprintf(l2, n2, "%s", s_status_l2);
+    return l1[0] != 0;
 }

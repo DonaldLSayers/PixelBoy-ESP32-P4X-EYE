@@ -25,6 +25,11 @@ void settings_defaults(app_settings_t *s)
     s->dc_auto = 0; /* new, opt-in - PixelBoy never had auto-exposure before this */
     s->dc_edge = 0; /* new, opt-in */
     s->gb_aeb = 0; /* new, opt-in */
+    s->backlight = BACKLIGHT_OPTIONS_COUNT - 1; /* last entry = 100% - matches the fixed
+                                                 * full-on backlight every earlier version
+                                                 * had, so existing units look unchanged */
+    s->standby = 2; /* index into STANDBY_SECONDS[] (app.c) - {0,15,30,60,120,300}[2] = 30s, the
+                     * fixed threshold this ran at before the setting existed */
 }
 
 bool settings_valid(const app_settings_t *s)
@@ -41,7 +46,8 @@ bool settings_valid(const app_settings_t *s)
           s->dc_size < DC_SIZE_COUNT && s->dc_amount >= 0.0f && s->dc_amount <= 1.0f &&
           s->vf_scale <= 2 && s->normal_size < NORMAL_SIZE_COUNT &&
           s->frame <= FRAME_COUNT + MAX_SD_FRAMES && s->sleep_min < SLEEP_OPTIONS_COUNT &&
-          s->gb_auto <= 1 && s->dc_auto <= 1 && s->dc_edge <= 1 && s->gb_aeb <= 6))
+          s->gb_auto <= 1 && s->dc_auto <= 1 && s->dc_edge <= 1 && s->gb_aeb <= 6 &&
+          s->backlight < BACKLIGHT_OPTIONS_COUNT && s->standby < STANDBY_OPTIONS_COUNT))
         return false;
     /* Upper bound only - GB has 4 quick-adjust targets, Dither has 6, Normal
      * has 3; the exact per-mode count is clamped again where it's read
