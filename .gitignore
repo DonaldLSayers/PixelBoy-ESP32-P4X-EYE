@@ -37,3 +37,4 @@ WIN_20260924_13_49_34_Pro.jpg
 # committing anything under assets/frames/ that came from one of these.
 assets/frames/framegroup_*.json
 assets/frames/frames_*.json
+firmware/main/build/

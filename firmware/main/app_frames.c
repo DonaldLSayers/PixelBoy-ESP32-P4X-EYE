@@ -51,8 +51,15 @@ bool frame_available(int frame)
      * every SD frame while the background load is still running - would hand
      * frames_get() an entry with no pixel data, and frame_compose_rgb()
      * dereferences that. Callers that are about to draw or photograph a frame
-     * that may have come from the card ask this first. */
-    return frame > 0 && frame <= frames_total();
+     * that may have come from the card ask this first.
+     *
+     * The indices check is the same bug by the other road: an SD frame whose
+     * .png is missing, corrupt, or named longer than s_filenames holds decodes
+     * to NULL, and frames_sd_get() returns the entry with .indices still NULL.
+     * Decoding here is not wasted work - frames_get() is exactly what the
+     * caller is about to do, and frames_sd_get() caches it. */
+    if (frame <= 0 || frame > frames_total()) return false;
+    return frames_get(frame - 1)->indices != NULL;
 }
 
 const frame_meta_t *frames_get(int index)

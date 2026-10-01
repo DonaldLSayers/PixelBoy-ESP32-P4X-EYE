@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -54,7 +55,14 @@ void settings_load(app_settings_t *s)
     if (rd == ESP_OK && len >= sizeof(uint8_t) && len <= sizeof st &&
         st.version == SETTINGS_VERSION) {
         app_settings_t merged = *s;
-        memcpy(&merged, &st.s, len - sizeof(uint8_t));
+        /* The stored payload begins where s does, not one byte past version:
+         * app_settings_t holds a float, so it is 4-byte aligned and there are
+         * 3 padding bytes between the two members. Copying len - sizeof(uint8_t)
+         * therefore read 3 bytes past st and wrote 3 past merged - a stack
+         * overflow, on every load of a current-version blob. */
+        size_t have = len > offsetof(stored_t, s) ? len - offsetof(stored_t, s) : 0;
+        if (have > sizeof merged) have = sizeof merged;
+        memcpy(&merged, &st.s, have);
         if (settings_valid(&merged)) *s = merged;
     }
     nvs_close(h);

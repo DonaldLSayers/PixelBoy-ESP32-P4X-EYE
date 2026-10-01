@@ -1277,9 +1277,12 @@ static void frames_sd_scan(void)
     /* Publish, in this order: the entries are all in place before the count
      * that makes them reachable goes up, and s_ready last of all. A reader
      * polling frames_sd_ready() therefore never indexes an entry that hasn't
-     * been written yet. */
+     * been written yet. The fence is what actually guarantees that - this task
+     * is on core 1 and every reader is on core 0. */
+    __sync_synchronize();
     s_count = s_n;
     s_ready = true;
+    __sync_synchronize();
 }
 
 /* The task's own entry point, so the inline fallback in frames_sd_start()

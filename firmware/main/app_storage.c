@@ -339,16 +339,17 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
      * just the plain photo, regardless of frame (see app_storage.h). */
     static uint8_t tiles[GBCAM_TILES_SIZE];
     gbcam_shades_to_tiles(shades, tiles);
-    bin_path_for(path, sizeof path, prefix, number);
-    FILE *f = fopen(path, "wb");
+    char bin_path[300];
+    bin_path_for(bin_path, sizeof bin_path, prefix, number);
+    FILE *f = fopen(bin_path, "wb");
     if (!f) {
-        PLOGE(TAG, "cannot write %s", path);
+        PLOGE(TAG, "cannot write %s", bin_path);
         return -1;
     }
     size_t written = fwrite(tiles, 1, sizeof tiles, f);
     fclose(f);
     if (written != sizeof tiles) {
-        remove(path);
+        remove(bin_path);
         return -1;
     }
 
@@ -379,10 +380,27 @@ int storage_save(const uint8_t *shades, gbcam_palette_t palette, int frame, cons
     }
     if (rgb) {
         path_for(path, sizeof path, prefix, number, "PNG");
-        if (!stbi_write_png(path, w, h, 3, rgb, w * 3))
-            PLOGW(TAG, "PNG write failed: %s", path);
+        if (!stbi_write_png(path, w, h, 3, rgb, w * 3)) {
+            /* The .PNG is the photo - the .BIN beside it is only the raw tiles
+             * the gallery's framed view is built from, so a .BIN without one is
+             * unreadable, and prune_orphaned_bins() deletes it on the next boot
+             * anyway (app_storage.c:198). Registering the photo regardless (the
+             * way this used to) means telling the user "saved GBnnnnn", showing
+             * it in the gallery until the reboot, then losing it silently with a
+             * hole left in the shared numbering. Drop it the same way
+             * storage_save_dc() does. */
+            PLOGE(TAG, "PNG write failed: %s - photo dropped", path);
+            remove(bin_path);
+            free(rgb);
+            return -1;
+        }
         write_thumbnail(prefix, number, rgb, w, h);
         free(rgb);
+    } else {
+        /* Couldn't allocate the RGB buffer - same thing, no PNG was written. */
+        PLOGE(TAG, "no memory for the PNG of %s%05d - photo dropped", prefix, number);
+        remove(bin_path);
+        return -1;
     }
 
     photo_t *p = &s_photos[s_count++];
